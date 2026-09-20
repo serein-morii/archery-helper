@@ -4285,12 +4285,16 @@ $('#settings-open').addEventListener('click', async () => {
     <label class="setting-row"><span>OTP 密钥（如有）</span>
       <input id="set-totp" type="password" value="${escapeHtml(cfg.totpSecret || '')}" placeholder="otpauth:// 链接或 base32，两步验证自动登录" autocomplete="off" spellcheck="false"></label>
     <div class="setting-actions">
-      <button class="button small" id="set-check-ver">检测版本</button>
-      <button class="button small" id="set-changelog">更新日志</button>
-      <button class="button small" id="set-shortcut">快捷键</button>
-      <button class="button small primary" id="set-save">保存并重连</button>
+      <button class="button primary full" id="set-save">保存并重连</button>
     </div>
-    <p class="setting-ver-status" id="set-ver-status">当前版本 v${escapeHtml(chrome.runtime.getManifest().version)}</p>`;
+    <div class="setting-foot">
+      <span class="setting-ver-status" id="set-ver-status">当前版本 v${escapeHtml(chrome.runtime.getManifest().version)}</span>
+      <div class="setting-foot-tools">
+        <button class="button small" id="set-check-ver">检测版本</button>
+        <button class="button small" id="set-changelog">更新日志</button>
+        <button class="button small" id="set-shortcut">快捷键</button>
+      </div>
+    </div>`;
   openModal('设置', body);
   body.querySelector('#set-save').addEventListener('click', async () => {
     const baseUrl = normalizeBase(body.querySelector('#set-url').value);

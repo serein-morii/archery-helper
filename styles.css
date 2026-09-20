@@ -1054,6 +1054,19 @@ dialog#modal::backdrop { background: rgba(8, 12, 18, 0.55); backdrop-filter: blu
 .setting-row > span { font-size: 12px; font-weight: 600; color: var(--text-2); }
 .setting-row input { width: 100%; }
 .setting-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+.button.full { flex: 1; justify-content: center; }
+/* 版本信息行：状态在左、版本工具在右，与保存操作用分隔线区隔 */
+.setting-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.setting-foot .setting-ver-status { margin: 0; }
+.setting-foot-tools { margin-left: auto; display: flex; gap: 8px; }
 .setting-ver-status {
   margin: 6px 0 0;
   font-size: 12px;
