@@ -21,7 +21,6 @@ const state = {
   resultSeq: 0,
   // 各列表页
   history: { page: 1, search: '', total: 0 },
-  favorites: { page: 1, search: '', total: 0 },
   workflow: { page: 1, search: '', total: 0 },
   theme: localStorage.getItem('archery-theme') || 'dark',
 };
@@ -104,6 +103,13 @@ function closeModal() {
   $('#modal')?.close();
 }
 $('#modal-close').addEventListener('click', closeModal);
+$('#modal').addEventListener('close', () => {
+  const remote = $('#modal').dataset.updateRemote;
+  if (remote) {
+    chrome.storage.local.set({ dismissedUpdate: remote });
+    delete $('#modal').dataset.updateRemote;
+  }
+});
 
 function download(filename, content, mime = 'text/plain') {
   const a = document.createElement('a');
@@ -139,7 +145,11 @@ function switchView(name) {
   $$('.rail-button[data-nav]').forEach((b) => b.classList.toggle('active', b.dataset.nav === name));
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
   if (name === 'history') loadHistory();
-  if (name === 'favorites') loadFavorites();
+  if (name === 'favorites') {
+    renderLocalList();
+    // 静默拉取云端新增（其它设备 / 网页端手动收藏），失败不打扰
+    refreshCloudFavorites({ quiet: true }).catch(() => {});
+  }
   if (name === 'workflow') loadWorkflows();
 }
 
@@ -2528,69 +2538,6 @@ function renderLogTable(tableEl, rows) {
   table.appendChild(tbody);
 }
 
-function cloudFavTitle(row) {
-  const head = parseCloudHead(row.sqllog);
-  if (head?.name) return head.name;
-  if (row.alias) return row.alias;
-  return String(row.sqllog || '').replace(/\s+/g, ' ').trim().slice(0, 40) || '云端收藏';
-}
-
-function renderCloudEmpty(title, hint) {
-  const wrap = $('#fav-cards');
-  wrap.replaceChildren(
-    el(`<div class="fav-empty"><span class="fav-empty-icon">${icon('star')}</span>
-      <b>${escapeHtml(title)}</b>
-      <small>${escapeHtml(hint)}</small></div>`)
-  );
-}
-
-function renderCloudFavCards(rows) {
-  const wrap = $('#fav-cards');
-  wrap.replaceChildren();
-  if (!rows.length) {
-    renderCloudEmpty('还没有云端收藏', '执行查询后点编辑器「收藏」，或从本地 SQL 同步到云端');
-    return;
-  }
-  for (const row of rows) {
-    const head = parseCloudHead(row.sqllog);
-    const title = cloudFavTitle(row);
-    const group = head?.group || '';
-    const card = el(`<div class="fav-card">
-      <div class="fav-card-top">
-        <div class="fav-card-title">
-          <b>${escapeHtml(title)}</b>
-          ${group ? `<span class="tag green">${escapeHtml(group)}</span>` : ''}
-          <span class="tag teal">云端</span>
-        </div>
-        <div class="fav-card-actions">
-          <button class="button small primary" data-act="run">${icon('play')}查询</button>
-          <button class="button small" data-act="fill">${icon('code')}回填</button>
-          <button class="icon-button danger" data-act="star" title="取消收藏">${icon('trash')}</button>
-        </div>
-      </div>
-      <pre class="fav-card-sql" title="点击展开 / 收起">${escapeHtml(stripSyncMarks(row.sqllog) || row.sqllog)}</pre>
-      <div class="fav-card-meta">
-        <span>${icon('database')}${escapeHtml(row.instance_name || '—')} · ${escapeHtml(row.db_name || '—')}</span>
-        <span>${icon('clock')}${escapeHtml(row.create_time || '')}</span>
-        ${row.effect_row != null && String(row.effect_row) !== '' ? `<span>${escapeHtml(String(row.effect_row))} 行 · ${escapeHtml(String(row.cost_time ?? '—'))}s</span>` : ''}
-      </div>
-    </div>`);
-    card.querySelector('.fav-card-sql').addEventListener('click', (e) => e.currentTarget.classList.toggle('open'));
-    card.querySelector('[data-act="run"]').addEventListener('click', () => fillFromLog(row, true));
-    card.querySelector('[data-act="fill"]').addEventListener('click', () => fillFromLog(row));
-    card.querySelector('[data-act="star"]').addEventListener('click', async () => {
-      try {
-        await state.api.favorite(row.id, false, row.alias || '');
-        toast(`已取消收藏「${title}」`, 'success');
-        loadFavorites();
-      } catch (e) {
-        toast(`操作失败：${e.message}`, 'error');
-      }
-    });
-    wrap.appendChild(card);
-  }
-}
-
 async function fillFromLog(row, run = false) {
   switchView('query');
   // 尽量联动实例与库
@@ -2608,31 +2555,6 @@ async function fillFromLog(row, run = false) {
 async function loadHistory() {
   const h = state.history;
   await loadLogPage(h, $('#history-table'), $('#history-pager'), $('#history-summary'), { starMode: false });
-}
-async function loadFavorites() {
-  const f = state.favorites;
-  const limit = 20;
-  const summaryEl = $('#fav-summary');
-  summaryEl.textContent = '加载中…';
-  try {
-    const res = await state.api.queryLog({
-      limit,
-      offset: (f.page - 1) * limit,
-      search: f.search,
-      star: 'true',
-    });
-    renderCloudFavCards(res.rows || []);
-    f.total = res.total || 0;
-    summaryEl.textContent = `共 ${f.total} 条`;
-    renderPager($('#fav-pager'), f.page, Math.max(1, Math.ceil(f.total / limit)), (p) => {
-      f.page = p;
-      loadFavorites();
-    });
-  } catch (e) {
-    summaryEl.textContent = `加载失败：${e.message}`;
-    renderCloudEmpty('列表加载失败', e.message || '请检查 Archery 地址与登录状态后重试');
-    $('#fav-pager')?.replaceChildren();
-  }
 }
 
 async function loadLogPage(pageState, tableEl, pagerSel, summaryEl, { starMode }) {
@@ -2696,24 +2618,17 @@ function fillLocalGroupFilter() {
   for (const g of localFav.groups) if (counts.get(g)) wrap.appendChild(chip(g, g, counts.get(g)));
 }
 
-function switchFavTab(which) {
-  $('#favtab-cloud').classList.toggle('active', which === 'cloud');
-  $('#favtab-local').classList.toggle('active', which === 'local');
-  $('#fav-cloud').hidden = which !== 'cloud';
-  $('#fav-local').hidden = which !== 'local';
-  if (which === 'local') renderLocalList();
-}
-$('#favtab-cloud').addEventListener('click', () => switchFavTab('cloud'));
-$('#favtab-local').addEventListener('click', () => switchFavTab('local'));
-
-/** 保存弹窗：命名 + 选分组 / 新建分组 */
+/** 保存弹窗：命名 + 选分组 / 新建分组 + 是否同步云端 */
 function openLocalSaveModal({ sql, instance = '', db = '', onSaved } = {}) {
   if (!sql?.trim()) return toast('没有可保存的 SQL', 'error');
   const body = el(`<div>
     <label class="setting-row"><span>名称</span><input id="lf-name" type="text" placeholder="例如：订单表慢查询" maxlength="60" /></label>
     <label class="setting-row"><span>分组</span><select id="lf-group" class="select"></select></label>
     <label class="setting-row"><span>新建分组（可选）</span><input id="lf-newgroup" type="text" placeholder="输入新分组名，留空则用上方分组" maxlength="30" /></label>
-    <div class="setting-actions"><button class="button primary" id="lf-save">${icon('check')}<span>保存到本地</span></button></div>
+    <div class="setting-row"><span>云端</span>
+      <label class="fav-check"><input type="checkbox" id="lf-cloud" />同步到 Archery 收藏，跨设备可见（仅只读语句）</label>
+    </div>
+    <div class="setting-actions"><button class="button primary" id="lf-save">${icon('check')}<span>保存</span></button></div>
   </div>`);
   const groupSel = body.querySelector('#lf-group');
   groupSel.innerHTML = '<option value="">未分组</option>' + localFav.groups.map((g) => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join('');
@@ -2727,15 +2642,32 @@ function openLocalSaveModal({ sql, instance = '', db = '', onSaved } = {}) {
       group = newGroup;
       if (!localFav.groups.includes(newGroup)) localFav.groups.push(newGroup);
     }
-    localFav.items.unshift({ id: String(Date.now()), name, sql: sql.trim(), instance, db, group, createdAt: Date.now() });
+    const item = {
+      id: String(Date.now()), name, sql: stripSyncMarks(sql.trim()), instance, db, group,
+      cloud: body.querySelector('#lf-cloud').checked, createdAt: Date.now(),
+    };
+    localFav.items.unshift(item);
     await localFav.persist();
     closeModal();
-    toast(`已保存「${name}」到本地`, 'success');
     fillLocalGroupFilter();
     renderLocalList();
     onSaved?.();
+    if (item.cloud) {
+      toast(`已保存「${name}」，正在同步云端…`, 'info');
+      try {
+        await pushItemToCloud(item);
+        await localFav.persist();
+        renderLocalList();
+        toast(`「${name}」已同步到云端收藏`, 'success');
+      } catch (e) {
+        renderLocalList();
+        toast(`已保存，但云端同步失败：${e.message}`, 'error');
+      }
+    } else {
+      toast(`已保存「${name}」`, 'success');
+    }
   });
-  openModal('保存 SQL 到本地', body);
+  openModal('保存 SQL 收藏', body);
 }
 
 $('#local-save-editor').addEventListener('click', () => {
@@ -2772,28 +2704,39 @@ async function runLocalSql(item) {
   runQuery();
 }
 
+let favSearchKw = '';
 function renderLocalList() {
   const wrap = $('#local-cards');
   const filter = localGroupFilter;
+  const kw = favSearchKw.trim().toLowerCase();
   const items = localFav.items
     .filter((i) => (filter === '' ? true : filter === '__none' ? !i.group : i.group === filter))
+    .filter((i) => !kw || `${i.name}\n${i.sql}\n${i.group || ''}\n${i.instance || ''}`.toLowerCase().includes(kw))
     .sort((a, b) => (a.group || '').localeCompare(b.group || '', 'zh-CN') || b.createdAt - a.createdAt);
   wrap.replaceChildren();
   if (!items.length) {
     wrap.appendChild(el(`<div class="fav-empty"><span class="fav-empty-icon">${icon('star')}</span>
-      <b>还没有本地 SQL</b>
-      <small>查询后在结果工具栏点「存本地」，或点右上角「保存编辑器 SQL」</small></div>`));
+      <b>${localFav.items.length ? '没有匹配的收藏' : '还没有收藏'}</b>
+      <small>${localFav.items.length ? '换个关键字或切换分组筛选试试' : '查询后在结果工具栏点「存本地」，或点右上角「保存编辑器 SQL」'}</small></div>`));
   }
   for (const item of items) {
+    const cloudBadge = item.cloudLogId
+      ? '<span class="tag teal" title="已保存到 Archery 收藏，跨设备可见">云端</span>'
+      : item.cloud
+        ? '<span class="tag yellow" title="已勾选云端但尚未同步成功，点「同步云端」重试">待同步</span>'
+        : '';
     const card = el(`<div class="fav-card">
       <div class="fav-card-top">
         <div class="fav-card-title">
           <b>${escapeHtml(item.name)}</b>
           ${item.group ? `<span class="tag green">${escapeHtml(item.group)}</span>` : ''}
-          ${item.cloudLogId ? '<span class="tag gray" title="已同步到 Archery 云端收藏">已同步</span>' : ''}
+          ${cloudBadge}
         </div>
         <div class="fav-card-actions">
           <button class="button small primary" data-act="run">${icon('play')}查询</button>
+          ${item.cloudLogId
+            ? `<button class="button small" data-act="cloud-off" title="从 Archery 收藏移除，本地保留">${icon('star')}取消云端</button>`
+            : `<button class="button small" data-act="cloud-on" title="保存到 Archery 收藏，跨设备可见">${icon('upload')}${item.cloud ? '同步云端' : '存到云端'}</button>`}
           <button class="button small" data-act="edit">${icon('format')}编辑</button>
           <button class="icon-button danger" data-act="del" title="删除">${icon('trash')}</button>
         </div>
@@ -2807,7 +2750,31 @@ function renderLocalList() {
     card.querySelector('.fav-card-sql').addEventListener('click', (e) => e.currentTarget.classList.toggle('open'));
     card.querySelector('[data-act="run"]').addEventListener('click', () => runLocalSql(item));
     card.querySelector('[data-act="edit"]').addEventListener('click', () => openLocalEditModal(item));
+    card.querySelector('[data-act="cloud-on"]')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      item.cloud = true;
+      try {
+        await pushItemToCloud(item);
+        await localFav.persist();
+        renderLocalList();
+        toast(`「${item.name}」已同步到云端收藏`, 'success');
+      } catch (err) {
+        await localFav.persist(); // 保留「待同步」状态，可重试
+        renderLocalList();
+        toast(`云端同步失败：${err.message}`, 'error');
+      }
+    });
+    card.querySelector('[data-act="cloud-off"]')?.addEventListener('click', async () => {
+      try {
+        await unstarCloudItem(item);
+        toast(`「${item.name}」已从云端收藏移除（本地保留）`, 'info');
+      } catch (err) {
+        toast(`操作失败：${err.message}`, 'error');
+      }
+    });
     card.querySelector('[data-act="del"]').addEventListener('click', async () => {
+      if (item.cloudLogId) state.api?.favorite(item.cloudLogId, false).catch(() => {}); // 云端收藏一并取消
       localFav.items = localFav.items.filter((x) => x.id !== item.id);
       await localFav.persist();
       fillLocalGroupFilter();
@@ -2816,15 +2783,19 @@ function renderLocalList() {
     });
     wrap.appendChild(card);
   }
-  $('#local-summary').textContent = `共 ${localFav.items.length} 条 · ${localFav.groups.length} 个分组`;
+  const synced = localFav.items.filter((i) => i.cloudLogId).length;
+  $('#local-summary').textContent = `共 ${localFav.items.length} 条 · ${localFav.groups.length} 个分组${synced ? ` · ${synced} 条在云端` : ''}`;
 }
 
-/** 编辑已保存条目：改名 / 换分组 / 改 SQL */
+/** 编辑已保存条目：改名 / 换分组 / 改 SQL / 云端开关（勾选时保存后自动重推云端并取消旧收藏） */
 function openLocalEditModal(item) {
   const body = el(`<div>
     <label class="setting-row"><span>名称</span><input id="lfe-name" type="text" maxlength="60" value="${escapeHtml(item.name)}" /></label>
     <label class="setting-row"><span>分组</span><select id="lfe-group" class="select"></select></label>
     <label class="setting-row"><span>新建分组（可选）</span><input id="lfe-newgroup" type="text" maxlength="30" placeholder="留空则用上方分组" /></label>
+    <div class="setting-row"><span>云端</span>
+      <label class="fav-check"><input type="checkbox" id="lfe-cloud" ${item.cloud ? 'checked' : ''} />同步到 Archery 收藏，跨设备可见（仅只读语句）</label>
+    </div>
     <label class="setting-row"><span>SQL</span><textarea id="lfe-sql" rows="6" style="font-family:var(--mono);font-size:12px"></textarea></label>
     <div class="setting-actions"><button class="button primary" id="lfe-save">${icon('check')}<span>保存修改</span></button></div>
   </div>`);
@@ -2837,14 +2808,36 @@ function openLocalEditModal(item) {
     if (!name || !sql) return toast('名称和 SQL 不能为空', 'error');
     const newGroup = body.querySelector('#lfe-newgroup').value.trim();
     if (newGroup && !localFav.groups.includes(newGroup)) localFav.groups.push(newGroup);
-    Object.assign(item, { name, sql, group: newGroup || groupSel.value });
+    Object.assign(item, { name, sql: stripSyncMarks(sql), group: newGroup || groupSel.value });
+    const wantCloud = body.querySelector('#lfe-cloud').checked;
+    const wasCloud = !!item.cloudLogId;
     await localFav.persist();
     closeModal();
     fillLocalGroupFilter();
-    renderLocalList();
-    toast('修改已保存', 'success');
+    try {
+      if (wantCloud) {
+        item.cloud = true;
+        await pushItemToCloud(item); // 重推即更新云端（含分组/名称标记），旧收藏自动取消
+        await localFav.persist();
+        renderLocalList();
+        toast('修改已保存，云端收藏已更新', 'success');
+      } else if (wasCloud) {
+        await unstarCloudItem(item);
+        renderLocalList();
+        toast('修改已保存，已从云端收藏移除（本地保留）', 'success');
+      } else {
+        item.cloud = false;
+        await localFav.persist();
+        renderLocalList();
+        toast('修改已保存', 'success');
+      }
+    } catch (e) {
+      await localFav.persist();
+      renderLocalList();
+      toast(`修改已保存，但云端操作失败：${e.message}`, 'error');
+    }
   });
-  openModal(`编辑本地 SQL · ${item.name}`, body);
+  openModal(`编辑收藏 · ${item.name}`, body);
 }
 
 /** 分组管理：新建 / 删除（组内条目回到未分组） */
@@ -2896,7 +2889,7 @@ $('#local-group-mgr').addEventListener('click', () => {
   openModal('管理本地分组', body);
 });
 
-localFav.load().then(() => { fillLocalGroupFilter(); });
+localFav.ready = localFav.load().then(() => { fillLocalGroupFilter(); });
 
 /** 导出全部本地 SQL 为 JSON（换机迁移用） */
 $('#local-export').addEventListener('click', () => {
@@ -2966,107 +2959,121 @@ function extractSqlLimit(sql) {
   return '0';
 }
 
-/** 云端收藏 → 本地（去重合并：带头注释的在本地已有，其余导入并记录 cloudLogId 防回推） */
-async function syncCloudToLocal() {
+/** 上推 / 更新云端收藏：执行带标记 SQL 一次 → 加星 → 自动取消旧收藏；成功后回写 cloudLogId */
+async function pushItemToCloud(item) {
+  if (!state.api) throw new Error('尚未连接 Archery');
+  if (!isReadOnlySql(item.sql)) throw new Error('仅支持只读语句（SELECT / SHOW / EXPLAIN / DESC / WITH）');
+  const ins = item.instance || $('#instance-name').value;
+  const db = item.db || $('#db-name').value;
+  if (!ins || !db) throw new Error('缺少实例或库：先在工作台选中，或编辑里确认来源实例未失效');
+  const sqlContent = withCloudMark(item.sql, item);
+  if (!sqlContent) throw new Error('SQL 中找不到可注入标记的语句关键字');
+  const q = await state.api.query({
+    instanceName: ins, dbName: db, schemaName: '', sqlContent,
+    limitNum: extractSqlLimit(item.sql),
+  });
+  if (q.status !== 0) throw new Error(q.msg || '执行失败');
+  // 执行日志里定位本次语句（并发查询时按标记 gid 兜底匹配）
+  const lg = await state.api.queryLog({ limit: 5, offset: 0 });
+  const rows = lg.rows || [];
+  const hit = rows.find((r) => parseCloudHead(String(r.sqllog))?.gid === item.id) || rows[0];
+  if (!hit) throw new Error('未找到执行日志');
+  await state.api.favorite(hit.id, true, item.name.slice(0, 60));
+  const oldId = item.cloudLogId;
+  if (oldId && oldId !== hit.id) await state.api.favorite(oldId, false).catch(() => {});
+  item.cloud = true;
+  item.cloudLogId = hit.id;
+}
+
+/** 取消云端收藏（本地条目保留） */
+async function unstarCloudItem(item) {
+  if (item.cloudLogId) await state.api.favorite(item.cloudLogId, false).catch(() => {});
+  item.cloud = false;
+  item.cloudLogId = null;
+  await localFav.persist();
+  renderLocalList();
+}
+
+/** 云端 → 本地：拉取 Archery 加星日志。带标记的按 gid 识别——
+ *  本地已有同 gid（其它设备重推）只更新指向的日志 id（本地内容为准）；
+ *  本地没有的导入（沿用 gid，本机再编辑重推仍是同一条）；
+ *  无标记的（网页端手动收藏）导入「云端收藏」分组。 */
+async function refreshCloudFavorites({ quiet = false } = {}) {
+  if (!state.api) return;
+  await localFav.ready; // 本地数据未就绪时先等加载，避免导入结果被初始加载覆盖
   const res = await state.api.queryLog({ limit: 100, offset: 0, star: 'true' });
   const rows = res.rows || [];
   const knownCloud = new Set(localFav.items.map((i) => i.cloudLogId).filter(Boolean));
-  let added = 0, wasLocal = 0;
+  const byGid = new Map(localFav.items.map((i) => [i.id, i]));
+  let added = 0, relinked = 0;
   const imports = [];
+  const now = Date.now();
   for (const row of rows) {
+    if (knownCloud.has(row.id)) continue;
     const head = parseCloudHead(row.sqllog);
-    if (head) { wasLocal += 1; continue; }          // 本地同步过去的，本地就是源头
-    if (knownCloud.has(row.id)) continue;            // 之前导入过
-    imports.push({
-      id: `c${row.id}`,
-      name: (row.alias || String(row.sqllog).replace(/\s+/g, ' ').slice(0, 40) || '云端收藏').slice(0, 60),
-      sql: String(row.sqllog || ''),
-      instance: row.instance_name || '',
-      db: row.db_name || '',
-      group: '云端收藏',
-      cloudLogId: row.id,
-      createdAt: Date.now(),
-    });
+    if (head?.gid && byGid.has(head.gid)) {
+      // 其它设备重推的同一条目：本地是源头，只把云端指向更新为最新日志
+      const it = byGid.get(head.gid);
+      if (it.cloudLogId && it.cloudLogId !== row.id) {
+        await state.api.favorite(it.cloudLogId, false).catch(() => {});
+      }
+      it.cloud = true;
+      it.cloudLogId = row.id;
+      relinked += 1;
+      continue;
+    }
+    if (head?.gid) {
+      const g = head.group || '';
+      if (g && !localFav.groups.includes(g)) localFav.groups.push(g);
+      imports.push({
+        id: head.gid,
+        name: (head.name || row.alias || '云端收藏').slice(0, 60),
+        sql: stripSyncMarks(row.sqllog),
+        instance: row.instance_name || '',
+        db: row.db_name || '',
+        group: g,
+        cloud: true,
+        cloudLogId: row.id,
+        createdAt: now,
+      });
+    } else {
+      if (!localFav.groups.includes('云端收藏')) localFav.groups.push('云端收藏');
+      imports.push({
+        id: `c${row.id}`,
+        name: (row.alias || String(row.sqllog).replace(/\s+/g, ' ').slice(0, 40) || '云端收藏').slice(0, 60),
+        sql: String(row.sqllog || ''),
+        instance: row.instance_name || '',
+        db: row.db_name || '',
+        group: '云端收藏',
+        cloud: true,
+        cloudLogId: row.id,
+        createdAt: now,
+      });
+    }
     added += 1;
   }
-  if (added) {
-    if (!localFav.groups.includes('云端收藏')) localFav.groups.push('云端收藏');
+  if (added || relinked) {
     localFav.items = [...imports, ...localFav.items];
     await localFav.persist();
     fillLocalGroupFilter();
     renderLocalList();
   }
-  return { added, total: rows.length, wasLocal };
-}
-
-/** 本地 → 云端：只读语句执行一次产生查询日志，加星 + 名称作别名；分组写进 SQL 头注释 */
-async function syncLocalToCloud(onStep) {
-  const curIns = $('#instance-name').value;
-  const curDb = $('#db-name').value;
-  const todo = localFav.items.filter((i) => !i.cloudLogId);
-  let pushed = 0, skippedRo = 0, failed = 0, done = 0;
-  for (const item of todo) {
-    done += 1;
-    onStep?.(done, todo.length, item.name);
-    if (!isReadOnlySql(item.sql)) { skippedRo += 1; continue; }
-    const ins = item.instance || curIns;
-    const db = item.db || curDb;
-    if (!ins || !db) { failed += 1; continue; }
-    try {
-      const sqlContent = withCloudMark(item.sql, item);
-      if (!sqlContent) { failed += 1; continue; }
-      const q = await state.api.query({
-        instanceName: ins, dbName: db, schemaName: '', sqlContent,
-        limitNum: extractSqlLimit(item.sql),
-      });
-      if (q.status !== 0) throw new Error(q.msg || '执行失败');
-      const lg = await state.api.queryLog({ limit: 1, offset: 0 });
-      const log = lg.rows?.[0];
-      if (!log) throw new Error('未找到执行日志');
-      await state.api.favorite(log.id, true, item.name.slice(0, 60));
-      item.cloudLogId = log.id;
-      pushed += 1;
-    } catch {
-      failed += 1;
-    }
+  if (!quiet) {
+    if (added || relinked) toast(`云端拉取完成：导入 ${added} 条${relinked ? `，更新 ${relinked} 条` : ''}`, 'success');
+    else toast('云端收藏已是最新', 'info');
   }
-  if (pushed) await localFav.persist();
-  renderLocalList();
-  return { pushed, skippedRo, failed };
 }
 
-$('#local-sync').addEventListener('click', () => {
-  const body = el(`<div style="display:flex;flex-direction:column;gap:10px;min-width:380px">
-    <button class="sync-card" id="sync-down">
-      <span class="sync-badge">${icon('download')}</span>
-      <span class="sync-text"><b>云端收藏 → 本地</b><small>导入 Archery 云端收藏，自动去重，归入「云端收藏」分组</small></span>
-    </button>
-    <button class="sync-card" id="sync-up">
-      <span class="sync-badge">${icon('upload')}</span>
-      <span class="sync-text"><b>本地收藏 → 云端</b><small>上推本地 SQL 为云端收藏（仅只读语句），名称与分组随行</small></span>
-    </button>
-    <div id="sync-status" style="font-size:12px;color:var(--text-3);min-height:18px"></div>
-  </div>`);
-  const status = body.querySelector('#sync-status');
-  const guard = async (btn, fn) => {
-    if (btn.disabled) return;
-    btn.disabled = true;
-    status.textContent = '同步中，请稍候…';
-    try {
-      const r = await fn((d, t, name) => { status.textContent = `上推 ${d}/${t}：${name}`; });
-      status.textContent = '';
-      closeModal();
-      if (r.added !== undefined) toast(`云端 → 本地完成：导入 ${r.added} 条（云端共 ${r.total} 条）`, 'success');
-      else toast(`本地 → 云端完成：上推 ${r.pushed} 条${r.skippedRo ? `，跳过写语句 ${r.skippedRo} 条` : ''}${r.failed ? `，失败 ${r.failed} 条` : ''}`, r.pushed || !r.failed ? 'success' : 'error');
-    } catch (e) {
-      status.textContent = '';
-      btn.disabled = false;
-      toast(`同步失败：${e.message}`, 'error');
-    }
-  };
-  body.querySelector('#sync-down').addEventListener('click', (e) => guard(e.currentTarget, syncCloudToLocal));
-  body.querySelector('#sync-up').addEventListener('click', (e) => guard(e.currentTarget, syncLocalToCloud));
-  openModal('云端 ⇄ 本地收藏同步', body);
+$('#cloud-refresh').addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  try {
+    await refreshCloudFavorites();
+  } catch (err) {
+    toast(`云端拉取失败：${err.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 /** 导入 JSON：按 名称+SQL+分组 去重合并，分组并入 */
@@ -3089,7 +3096,8 @@ $('#local-import-file').addEventListener('change', async (e) => {
         id: String(Date.now()) + added,
         name: String(it.name), sql: String(it.sql),
         instance: it.instance || '', db: it.db || '',
-        group: it.group || '', createdAt: it.createdAt || Date.now(),
+        group: it.group || '', cloud: !!it.cloud, cloudLogId: it.cloudLogId || null,
+        createdAt: it.createdAt || Date.now(),
       });
       added += 1;
     }
@@ -3132,9 +3140,12 @@ function bindSearch(inputSel, pageState, reload) {
   });
 }
 bindSearch('#history-search', state.history, loadHistory);
-bindSearch('#fav-search', state.favorites, loadFavorites);
 $('#history-refresh').addEventListener('click', loadHistory);
-$('#fav-refresh').addEventListener('click', loadFavorites);
+/* 收藏搜索：本机过滤（名称 / SQL / 分组 / 实例） */
+$('#fav-search').addEventListener('input', (e) => {
+  favSearchKw = e.target.value;
+  renderLocalList();
+});
 
 /* ======================= SQL 审核检测 ======================= */
 $('#audit-instance').addEventListener('change', async (e) => {
@@ -4330,14 +4341,7 @@ $('#settings-open').addEventListener('click', async () => {
       btn.textContent = prev;
     }
   });
-  body.querySelector('#set-changelog').addEventListener('click', async () => {
-    try {
-      const md = await (await fetch(chrome.runtime.getURL('CHANGELOG.md'))).text();
-      openModal(`更新日志 · v${chrome.runtime.getManifest().version}`, el(`<div class="md-view">${renderMarkdown(md)}</div>`));
-    } catch (e) {
-      toast('更新日志读取失败', 'error');
-    }
-  });
+  body.querySelector('#set-changelog').addEventListener('click', () => openChangelogModal());
   body.querySelector('#set-shortcut').addEventListener('click', () => {
     const g = document.createElement('div');
     g.className = 'shortcut-grid';
@@ -4389,6 +4393,7 @@ async function openUpdateModal(remote) {
       <button class="button small primary" id="upd-download">${icon('download')}<span>下载更新包</span></button>
     </div>
   </div>`);
+  $('#modal').dataset.updateRemote = remote;
   openModal(`发现新版本 ${remote}`, body);
   fetch(GITHUB_CHANGELOG, { cache: 'no-store', signal: AbortSignal.timeout(8000) })
     .then((r) => {
@@ -4484,13 +4489,39 @@ async function checkRemoteVersion({ force = false } = {}) {
   }
 }
 
-(function fillVersion() {
+async function openChangelogModal() {
+  try {
+    const md = await (await fetch(chrome.runtime.getURL('CHANGELOG.md'))).text();
+    openModal(`更新日志 · v${chrome.runtime.getManifest().version}`, el(`<div class="md-view">${renderMarkdown(md)}</div>`));
+  } catch (e) {
+    toast('更新日志读取失败', 'error');
+  }
+}
+
+/** 首次安装后第一次打开工作台时展示更新日志；已有用户重新加载不弹 */
+async function maybeShowWelcomeChangelog() {
+  try {
+    const { welcomeChangelog } = await chrome.storage.local.get('welcomeChangelog');
+    if (!welcomeChangelog) return false;
+    await chrome.storage.local.set({ welcomeChangelog: false });
+    await openChangelogModal();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+(async function fillVersion() {
   const v = chrome.runtime.getManifest().version;
   const badge = document.querySelector('#app-version');
   if (badge) badge.textContent = v;
   const foot = document.querySelector('#footer-target');
   if (foot) foot.textContent = `v${v}`;
-  checkRemoteVersion();
+  const welcomed = await maybeShowWelcomeChangelog();
+  const r = await checkRemoteVersion();
+  if (welcomed || r.status !== 'newer') return;
+  const { dismissedUpdate } = await chrome.storage.local.get('dismissedUpdate');
+  if (dismissedUpdate !== r.remote) openUpdateModal(r.remote);
 })();
 if (!queryTabs.list.length) newQueryTab();
 renderResultTabs();

@@ -44,7 +44,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 // 安装/启动时若已有配置则先注册一次
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (details) => {
+  if (details.reason === 'install') {
+    await chrome.storage.local.set({ welcomeChangelog: true });
+  }
   const { archeryConfig } = await chrome.storage.local.get('archeryConfig');
   if (archeryConfig?.baseUrl) setupOriginRule(archeryConfig.baseUrl);
 });

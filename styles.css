@@ -450,20 +450,12 @@ body.sidebar-collapsed #sidebar-toggle:hover {
 #view-favorites, #view-history, #view-workflow, #view-diff, #view-diag, #view-audit {
   overflow: hidden;
 }
-#fav-cloud, #fav-local {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-#fav-local .fav-cards, #fav-cloud .fav-cards, #view-history .table-wrap, #view-workflow .table-wrap {
+/* 收藏页卡片列表即滚动容器（视图本身不滚，避免工具栏/分组条被卷走） */
+#view-favorites .fav-cards, #view-history .table-wrap, #view-workflow .table-wrap {
   flex: 1;
   min-height: 0;
   overflow: auto;
 }
-#fav-cloud .pager { margin-left: 0; }
-#fav-cloud .pager:empty { display: none; }
 .fav-cards:has(> .fav-empty) {
   justify-content: center;
 }
@@ -1672,46 +1664,19 @@ body.results-expanded .editor-toolbar { display: none; }
 .fav-empty b { color: var(--text-2); font-size: 13px; }
 .fav-empty small { font-size: 12px; }
 
-/* 同步方向卡片（云端 ⇄ 本地 弹窗） */
-.sync-card {
+/* 收藏弹窗「同步云端」勾选行 */
+.fav-check {
   display: flex;
   align-items: center;
-  gap: 12px;
-  width: 100%;
-  padding: 13px 15px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--panel-2);
-  color: var(--text-1);
-  font-size: 13px;
-  text-align: left;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-2);
   cursor: pointer;
-  transition: all 0.15s ease;
+  user-select: none;
 }
-.sync-card:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--brand) 45%, var(--border));
-  background: var(--panel);
-  box-shadow: var(--shadow-sm);
-  transform: translateY(-1px);
-}
-.sync-card:active:not(:disabled) { transform: translateY(0) scale(0.99); box-shadow: none; }
-.sync-card:disabled { opacity: 0.55; cursor: wait; transform: none; }
-.sync-badge {
-  flex: none;
-  width: 36px;
-  height: 36px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 10px;
-  background: var(--brand-soft);
-  color: var(--brand);
-}
-.sync-badge .icon { width: 18px; height: 18px; }
-.sync-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.sync-text b { font-size: 13px; }
-.sync-text small { font-size: 11.5px; color: var(--text-3); font-weight: 400; line-height: 1.5; }
-.sync-card:hover .sync-text small { color: var(--text-2); }
+.fav-check:hover { color: var(--text-1); }
+input[type='checkbox'] { accent-color: var(--brand); width: 15px; height: 15px; flex: none; cursor: pointer; }
 
 /* ---------- 搜索命中高亮（联想 / 下拉 / 命令面板） ---------- */
 .button.favpick {

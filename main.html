@@ -239,40 +239,28 @@
           <div class="list-head">
             <div>
               <h1>SQL 收藏</h1>
-              <p class="list-sub">云端收藏同步 Archery 账号；本地 SQL 仅存本机，可命名、分组、一键查询。</p>
+              <p class="list-sub">勾选「云端」的条目保存到 Archery 收藏（跨设备可见），其余仅存本机。</p>
             </div>
             <div class="fav-head-actions">
               <button class="button small primary" id="local-save-editor"><span data-icon="plus"></span>保存编辑器 SQL</button>
-              <button class="button small" id="local-sync" title="云端收藏与本地 SQL 互相同步"><span data-icon="refresh"></span>同步</button>
             </div>
           </div>
-          <div class="sub-tabs" role="tablist" aria-label="收藏类型">
-            <button class="sub-tab active" id="favtab-cloud" role="tab">云端收藏</button>
-            <button class="sub-tab" id="favtab-local" role="tab">本地 SQL</button>
-          </div>
-          <div id="fav-cloud">
-            <div class="fav-toolbar">
-              <div class="search-field wide">
-                <span data-icon="search"></span>
-                <input id="fav-search" placeholder="搜索收藏（SQL / 别名 / 实例）…" />
-              </div>
-              <button class="icon-button" id="fav-refresh" title="刷新"><span data-icon="refresh"></span></button>
-              <span class="local-summary" id="fav-summary"></span>
-              <div class="pager" id="fav-pager"></div>
+          <div class="fav-toolbar">
+            <div class="search-field wide">
+              <span data-icon="search"></span>
+              <input id="fav-search" placeholder="搜索收藏（名称 / SQL / 分组 / 实例）…" />
             </div>
-            <div class="fav-cards" id="fav-cards"></div>
           </div>
-          <div id="fav-local" hidden>
-            <div class="local-bar">
-              <button class="button small" id="local-group-mgr"><span data-icon="folder"></span>管理分组</button>
-              <button class="icon-button" id="local-export" title="导出为 JSON 文件，可迁移到其他电脑"><span data-icon="download"></span></button>
-              <button class="icon-button" id="local-import" title="从导出的 JSON 文件导入"><span data-icon="upload"></span></button>
-              <input type="file" id="local-import-file" accept=".json,application/json" hidden />
-              <span class="local-summary" id="local-summary"></span>
-            </div>
-            <div class="fav-group-chips" id="local-group-chips"></div>
-            <div class="fav-cards" id="local-cards"></div>
+          <div class="local-bar">
+            <button class="button small" id="local-group-mgr"><span data-icon="folder"></span>管理分组</button>
+            <button class="icon-button" id="cloud-refresh" title="从 Archery 云端拉取收藏（其它设备新增、网页端手动收藏）"><span data-icon="refresh"></span></button>
+            <button class="icon-button" id="local-export" title="导出为 JSON 文件，可迁移到其他电脑"><span data-icon="download"></span></button>
+            <button class="icon-button" id="local-import" title="从导出的 JSON 文件导入"><span data-icon="upload"></span></button>
+            <input type="file" id="local-import-file" accept=".json,application/json" hidden />
+            <span class="local-summary" id="local-summary"></span>
           </div>
+          <div class="fav-group-chips" id="local-group-chips"></div>
+          <div class="fav-cards" id="local-cards"></div>
         </section>
 
         <!-- ============ SQL 审核检测 ============ -->
