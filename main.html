@@ -54,10 +54,10 @@
             <span data-icon="panel"></span><small>收起</small>
           </button>
           <button class="rail-button" id="theme-toggle" title="切换深浅主题" aria-label="切换深浅主题">
-            <span data-icon="moon"></span>
+            <span data-icon="moon"></span><small>主题</small>
           </button>
           <button class="rail-button" id="settings-open" title="偏好设置" aria-label="偏好设置">
-            <span data-icon="settings"></span>
+            <span data-icon="settings"></span><small>设置</small>
           </button>
           <span class="rail-footer">AR</span>
         </div>
@@ -145,6 +145,7 @@
               </div>
               <div class="toolbar-right">
                 <span id="editor-selection" class="editor-hint">选中 SQL 可单独运行</span>
+                <span id="editor-cursor" class="editor-cursor">1:1</span>
                 <button class="icon-button" id="import-sql" title="导入 SQL 文件" aria-label="导入 SQL 文件">
                   <span data-icon="upload"></span>
                 </button>
@@ -187,6 +188,7 @@
               <span class="result-hint">点击列名排序 · 右键列头/行有惊喜</span>
               <button class="button small" id="save-local" title="把当前结果的 SQL 命名保存到本地"><span data-icon="plus"></span>存本地</button>
               <button class="button small" id="chart-toggle"><span data-icon="grid"></span>图表</button>
+              <button class="button small" id="chart-back" hidden><span data-icon="table"></span>返回表格</button>
               <button class="button small" id="compare-toggle"><span data-icon="copy"></span>对比</button>
               <button class="button small" id="export-csv" hidden><span data-icon="download"></span>CSV</button>
               <button class="button small" id="export-excel" hidden>Excel</button>
@@ -237,7 +239,11 @@
           <div class="list-head">
             <div>
               <h1>SQL 收藏</h1>
-              <p class="list-sub">云端收藏同步 Archery；本地 SQL 仅存本机，可命名、分组、一键查询。</p>
+              <p class="list-sub">云端收藏同步 Archery 账号；本地 SQL 仅存本机，可命名、分组、一键查询。</p>
+            </div>
+            <div class="fav-head-actions">
+              <button class="button small primary" id="local-save-editor"><span data-icon="plus"></span>保存编辑器 SQL</button>
+              <button class="button small" id="local-sync" title="云端收藏与本地 SQL 互相同步"><span data-icon="refresh"></span>同步</button>
             </div>
           </div>
           <div class="sub-tabs" role="tablist" aria-label="收藏类型">
@@ -245,30 +251,27 @@
             <button class="sub-tab" id="favtab-local" role="tab">本地 SQL</button>
           </div>
           <div id="fav-cloud">
-            <div class="list-head" style="margin:10px 0 0">
+            <div class="fav-toolbar">
               <div class="search-field wide">
                 <span data-icon="search"></span>
-                <input id="fav-search" placeholder="搜索收藏…" />
+                <input id="fav-search" placeholder="搜索收藏（SQL / 别名 / 实例）…" />
               </div>
               <button class="icon-button" id="fav-refresh" title="刷新"><span data-icon="refresh"></span></button>
-            </div>
-            <div class="table-wrap"><table class="data-table" id="fav-table"></table></div>
-            <div class="list-footer"><span id="fav-summary"></span>
+              <span class="local-summary" id="fav-summary"></span>
               <div class="pager" id="fav-pager"></div>
             </div>
+            <div class="fav-cards" id="fav-cards"></div>
           </div>
           <div id="fav-local" hidden>
             <div class="local-bar">
-              <button class="button small primary" id="local-save-editor"><span data-icon="plus"></span>保存编辑器 SQL</button>
               <button class="button small" id="local-group-mgr"><span data-icon="folder"></span>管理分组</button>
-              <select id="local-group-filter" class="select"><option value="">全部分组</option></select>
-              <button class="button small" id="local-export" title="导出为 JSON 文件，可迁移到其他电脑"><span data-icon="download"></span>导出</button>
-              <button class="button small" id="local-import" title="从导出的 JSON 文件导入"><span data-icon="upload"></span>导入</button>
-              <button class="button small" id="local-sync" title="云端收藏与本地 SQL 互相同步"><span data-icon="refresh"></span>同步</button>
+              <button class="icon-button" id="local-export" title="导出为 JSON 文件，可迁移到其他电脑"><span data-icon="download"></span></button>
+              <button class="icon-button" id="local-import" title="从导出的 JSON 文件导入"><span data-icon="upload"></span></button>
               <input type="file" id="local-import-file" accept=".json,application/json" hidden />
               <span class="local-summary" id="local-summary"></span>
             </div>
-            <div class="table-wrap"><table class="data-table" id="local-table"></table></div>
+            <div class="fav-group-chips" id="local-group-chips"></div>
+            <div class="fav-cards" id="local-cards"></div>
           </div>
         </section>
 
@@ -330,45 +333,63 @@
               <p class="list-sub">两个环境（如 UAT vs PRO）的库表差异：多表 / 少表 / 结构不同，可查看建表语句差异。</p>
             </div>
           </div>
-          <div class="query-bar">
-            <label class="bar-field">
-              <span>实例 A</span>
-              <select id="diff-instance-a" class="select"></select>
-            </label>
-            <label class="bar-field">
-              <span>库 A</span>
-              <select id="diff-db-a" class="select"><option value="">选择库</option></select>
-            </label>
-            <label class="bar-field grow">
-              <span>表 A</span>
-              <select id="diff-table-a" class="select"><option value="">选库后可选表</option></select>
-            </label>
-            <label class="bar-field">
-              <span>实例 B</span>
-              <select id="diff-instance-b" class="select"></select>
-            </label>
-            <label class="bar-field">
-              <span>库 B</span>
-              <select id="diff-db-b" class="select"><option value="">选择库</option></select>
-            </label>
-            <label class="bar-field grow">
-              <span>表 B（默认同名）</span>
-              <select id="diff-table-b" class="select"><option value="">选库后可选表</option></select>
-            </label>
-            <button class="button primary" id="diff-table-run"><span data-icon="table"></span>对比此表</button>
+          <div class="diff-compare">
+            <div class="diff-side">
+              <header>环境 A</header>
+              <div class="diff-side-fields">
+                <label class="bar-field">
+                  <span>实例</span>
+                  <select id="diff-instance-a" class="select"></select>
+                </label>
+                <label class="bar-field">
+                  <span>库</span>
+                  <select id="diff-db-a" class="select"><option value="">选择库</option></select>
+                </label>
+                <label class="bar-field grow">
+                  <span>表</span>
+                  <select id="diff-table-a" class="select"><option value="">选库后可选表</option></select>
+                </label>
+              </div>
+            </div>
+            <div class="diff-vs" aria-hidden="true">↔</div>
+            <div class="diff-side">
+              <header>环境 B</header>
+              <div class="diff-side-fields">
+                <label class="bar-field">
+                  <span>实例</span>
+                  <select id="diff-instance-b" class="select"></select>
+                </label>
+                <label class="bar-field">
+                  <span>库</span>
+                  <select id="diff-db-b" class="select"><option value="">选择库</option></select>
+                </label>
+                <label class="bar-field grow">
+                  <span>表（默认同名）</span>
+                  <select id="diff-table-b" class="select"><option value="">选库后可选表</option></select>
+                </label>
+              </div>
+            </div>
           </div>
-          <div class="query-bar">
-            <span class="editor-hint" style="padding-bottom:6px">整库：</span>
-            <button class="button" id="diff-run"><span data-icon="list"></span>对比表清单（快，不扫结构）</button>
-            <button class="button" id="diff-deep"><span data-icon="shield"></span>深度对比全部同名表（逐表请求，慢）</button>
-            <span class="editor-hint" style="padding-bottom:6px">清单只差 2 个请求；结构差异优先用上方单表对比</span>
+          <div class="query-bar diff-actions">
+            <button class="button primary" id="diff-table-run"><span data-icon="table"></span>对比此表</button>
+            <span class="diff-actions-sep">整库</span>
+            <button class="button" id="diff-run"><span data-icon="list"></span>对比表清单</button>
+            <button class="button" id="diff-deep"><span data-icon="shield"></span>深度对比同名表</button>
+            <span class="editor-hint">清单只扫表名；结构差异优先用单表对比</span>
           </div>
           <div id="diff-progress" class="diff-progress" hidden>
             <span class="spinner"></span><span id="diff-progress-text">对比中…</span>
           </div>
           <div id="diff-summary" class="audit-summary" hidden></div>
           <div id="diff-field-wrap" class="table-wrap" style="max-height:42%" hidden><table class="data-table" id="diff-field-table"></table></div>
-          <div class="table-wrap"><table class="data-table" id="diff-table"></table></div>
+          <div class="table-wrap">
+            <table class="data-table" id="diff-table" hidden></table>
+            <div class="list-empty" id="diff-empty">
+              <span data-icon="rollback"></span>
+              <b>选择两侧实例和库后开始对比</b>
+              <small>单表看结构差异；整库清单只扫表名，深度对比会逐表请求</small>
+            </div>
+          </div>
         </section>
 
         <!-- ============ 容量与事务诊断 ============ -->
@@ -389,8 +410,8 @@
           </div>
           <div id="diag-summary" class="audit-summary" hidden></div>
           <div class="table-wrap"><table class="data-table" id="space-table"></table></div>
-          <div class="list-head" style="margin-top:4px">
-            <div><h1 style="font-size:14px">InnoDB 事务</h1></div>
+          <div class="list-head diag-subhead">
+            <div><h2>InnoDB 事务</h2></div>
           </div>
           <div class="table-wrap" style="max-height:280px"><table class="data-table" id="trx-table"></table></div>
         </section>
@@ -416,7 +437,7 @@
         </section>
 
         <footer class="workspace-footer">
-          <span><i class="status-dot"></i>Archery 助手 <b id="footer-target"></b></span>
+          <span><i class="status-dot"></i>Archery 助手</span>
           <span id="footer-target"></span>
         </footer>
       </main>

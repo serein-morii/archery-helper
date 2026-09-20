@@ -66,9 +66,11 @@
   margin: 1px 0 0;
   color: var(--text-3);
   font-size: 11px;
-  white-space: nowrap;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .connection {
@@ -156,7 +158,7 @@
   background: var(--brand-soft);
   color: var(--brand);
   border: 1px solid color-mix(in srgb, var(--brand) 25%, transparent);
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 .popup-message.error {
   background: var(--danger-soft);
@@ -166,6 +168,36 @@
 
 /* 主按钮撑满 */
 .popup-open { justify-content: center; height: 38px; font-size: 13.5px; }
+
+/* 保存凭证并登录：品牌渐变主按钮，登录中勾图标换旋转加载圈 */
+.button.popup-save {
+  justify-content: center;
+  height: 34px;
+  border-radius: 9px;
+  border-color: transparent;
+  background: var(--brand-grad);
+  color: var(--on-brand);
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  box-shadow: var(--glow-brand);
+}
+.button.popup-save:hover:not(:disabled) {
+  filter: brightness(1.08);
+  box-shadow: 0 3px 14px rgba(13, 148, 136, 0.42);
+}
+.button.popup-save:active:not(:disabled) { transform: translateY(1px) scale(0.985); box-shadow: none; }
+.button.popup-save:disabled { opacity: 1; cursor: wait; filter: saturate(0.55) brightness(0.9); }
+.button.popup-save:disabled [data-icon] { display: none; }
+.button.popup-save:disabled::before {
+  content: "";
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--on-brand) 35%, transparent);
+  border-top-color: var(--on-brand);
+  animation: spin 0.7s linear infinite;
+}
 
 .popup-help {
   display: flex;

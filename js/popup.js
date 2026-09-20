@@ -19,10 +19,44 @@ function setStatus(ok, text) {
 }
 
 /**
+ * 地址未配置时，探测当前标签页是否为 Archery 站点：
+ * 抓取该站点的 /login/ 页面，按 Archery 特征判断——
+ * - 未登录：登录页 <title> 恰为 Archery；
+ * - 已登录：Django 会 302 到站内页，标题含 Archery 且导航栏
+ *   品牌链接指向 /index/（Archery v1.9.1 base.html 的固定结构）。
+ * 返回站点 origin（如 http://archery.example.com:9123），非 Archery 或探测失败返回 null。
+ */
+async function detectArcheryOnCurrentTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  let u;
+  try {
+    u = new URL(tab?.url || '');
+  } catch {
+    return null;
+  }
+  if (!/^https?:$/.test(u.protocol)) return null; // chrome:// / 扩展页 / 本地文件等无法探测
+  const origin = `${u.protocol}//${u.host}`;
+  try {
+    const resp = await fetch(`${origin}/login/`, {
+      credentials: 'include',
+      signal: AbortSignal.timeout(8000),
+    });
+    const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+    const title = (doc.title || '').trim().toLowerCase();
+    if (title === 'archery') return origin;
+    if (title.includes('archery') && doc.querySelector('.navbar-brand[href="/index/"]')) return origin;
+  } catch {
+    /* 站点不可达、证书错误等：视为非 Archery，走手动填写 */
+  }
+  return null;
+}
+
+/**
  * 打开弹窗即自动检测：
- * 1. 读浏览器 cookie jar 里的 sessionid（用户在浏览器登录过 Archery 即存在）；
- * 2. 有会话 → 调一次轻量接口验证并取用户显示名；
- * 3. 无会话但有保存的凭证 → 自动登录。
+ * 1. 未配置地址 → 探测当前标签页是否为 Archery，是则自动采用该地址；
+ * 2. 读浏览器 cookie jar 里的 sessionid（用户在浏览器登录过 Archery 即存在）；
+ * 3. 有会话 → 调一次轻量接口验证并取用户显示名；
+ * 4. 无会话但有保存的凭证 → 自动登录。
  */
 async function detect() {
   const cfg = await loadConfig();
@@ -31,12 +65,20 @@ async function detect() {
   $('#password').value = cfg.password;
   $('#totp-secret').value = cfg.totpSecret || '';
 
-  // 首次使用（未配置地址）：直接引导填写，不做任何请求
+  // 首次使用（未配置地址）：先看当前标签页是不是 Archery，是则自动采用
   if (!cfg.baseUrl) {
     $('#popup-name').textContent = '未配置';
+    $('#popup-code').textContent = '正在检测当前页是否为 Archery…';
+    setStatus(false, '检测中');
+    const origin = await detectArcheryOnCurrentTab();
+    if (origin) {
+      await saveConfig({ baseUrl: origin });
+      message(`检测到当前页是 Archery（${origin}），已自动采用该地址。`);
+      return detect(); // 地址就位，重走完整检测流程
+    }
     $('#popup-code').textContent = '首次使用：填写你的 Archery 地址';
     setStatus(false, '未配置');
-    message('展开「自动重登凭证」，填写 Archery 地址（如 http://archery.example.com:9123）、账号密码并保存。', true);
+    message('当前页不是 Archery。展开「自动重登凭证」填写 Archery 地址（如 http://archery.example.com:9123）保存，或先在浏览器打开 Archery 页面再点开本弹窗自动识别。', true);
     return;
   }
 
@@ -127,6 +169,7 @@ async function doSaveAndLogin() {
     return;
   }
   btn.disabled = true;
+  btn.lastElementChild.textContent = '正在连接…';
   message('正在连接…');
   try {
     const ok = await ensureHostPermission(baseUrl);
@@ -153,6 +196,7 @@ async function doSaveAndLogin() {
     }
   } finally {
     btn.disabled = false;
+    btn.lastElementChild.textContent = '保存凭证并登录';
   }
 }
 

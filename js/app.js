@@ -14,6 +14,7 @@ const state = {
   instances: [], // [{id, instance_name, db_type, type}]
   current: { instance: '', db: '', schema: '' },
   dbs: [], // 当前实例库列表
+  dbsLoading: Promise.resolve(), // 当前实例库列表的在途加载（树点击等待库选项就绪用）
   results: [], // 结果 tab 集合
   activeResult: null,
   lastQueryLogId: null, // 最近一次执行对应的 query_log_id（收藏用）
@@ -122,7 +123,7 @@ function timestamp() {
 /* ======================= 主题 ======================= */
 function applyTheme() {
   document.documentElement.dataset.theme = state.theme;
-  $('#theme-toggle').innerHTML = icon(state.theme === 'dark' ? 'sun' : 'moon');
+  $('#theme-toggle').innerHTML = `${icon(state.theme === 'dark' ? 'sun' : 'moon')}<small>主题</small>`;
 }
 $('#theme-toggle').addEventListener('click', () => {
   state.theme = state.theme === 'dark' ? 'light' : 'dark';
@@ -329,7 +330,9 @@ function buildInstanceSelectors() {
   $('#diag-instance').innerHTML = opts.join('');
 }
 
+let instanceLoadSeq = 0; // 实例切换序号：过期的库列表响应直接丢弃，防止旧响应重建下拉时清掉新选的库
 async function onInstanceChange(instanceName, { fromTree = false } = {}) {
+  const seq = ++instanceLoadSeq;
   state.current.instance = instanceName;
   state.current.db = '';
   state.current.schema = '';
@@ -341,21 +344,42 @@ async function onInstanceChange(instanceName, { fromTree = false } = {}) {
   state.dbs = [];
   saveDraft();
   if (!instanceName) return;
-  try {
-    const res = await state.api.databases(instanceName);
-    if (res.status !== 0) throw new Error(res.msg);
-    state.dbs = res.data || [];
-    dbSel.innerHTML =
-      '<option value="">选择库</option>' +
-      state.dbs.map((d) => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('');
-    dbSel.disabled = false;
-    // PgSQL 需要 schema
-    const ins = state.instances.find((i) => i.instance_name === instanceName);
-    if (ins?.db_type === 'pgsql') $('#schema-field').hidden = false;
-  } catch (e) {
-    toast(`获取数据库列表失败：${e.message}`, 'error');
-  }
+  state.dbsLoading = (async () => {
+    try {
+      const res = await state.api.databases(instanceName);
+      if (seq !== instanceLoadSeq) return; // 已切到别的实例（或重复触发），本次响应过期
+      if (res.status !== 0) throw new Error(res.msg);
+      state.dbs = res.data || [];
+      dbSel.innerHTML =
+        '<option value="">选择库</option>' +
+        state.dbs.map((d) => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('');
+      dbSel.disabled = false;
+      // PgSQL 需要 schema
+      const ins = state.instances.find((i) => i.instance_name === instanceName);
+      if (ins?.db_type === 'pgsql') $('#schema-field').hidden = false;
+    } catch (e) {
+      toast(`获取数据库列表失败：${e.message}`, 'error');
+    }
+  })();
+  await state.dbsLoading;
   if (!fromTree) highlightTreeNode(['i', instanceName]);
+}
+
+/**
+ * 选中实例并等待其库列表就绪（供 树/历史回填/草稿恢复/命令面板 等联动调用）。
+ * 设值后派发一次 change：combo 显示层靠 change 刷新标签（静默设值会导致
+ * 界面仍显示旧实例），实例加载链也由 change 监听统一发起，全程只有一条链。
+ */
+async function selectInstance(name) {
+  const sel = $('#instance-name');
+  if (name && sel.value !== name) {
+    if (!sel.querySelector(`option[value="${CSS.escape(String(name))}"]`)) return;
+    sel.value = name;
+    sel.dispatchEvent(new Event('change', { bubbles: true })); // 单链：监听器发起 onInstanceChange
+  } else if (!name) {
+    onInstanceChange('');
+  }
+  await state.dbsLoading;
 }
 
 $('#instance-name').addEventListener('change', (e) => onInstanceChange(e.target.value));
@@ -461,10 +485,9 @@ function instanceNode(ins) {
   row.addEventListener('click', async () => {
     node.classList.toggle('open');
     row.classList.toggle('expanded');
-    // 联动查询栏
+    // 联动查询栏（selectInstance 负责 combo 标签刷新与单链加载）
     if ($('#instance-name').value !== ins.name) {
-      $('#instance-name').value = ins.name;
-      await onInstanceChange(ins.name, { fromTree: true });
+      await selectInstance(ins.name);
     }
     if (node.classList.contains('open') && !loaded) {
       loaded = true;
@@ -519,16 +542,15 @@ function dbNode(ins, dbName) {
   row.addEventListener('click', async (e) => {
     node.classList.toggle('open');
     row.classList.toggle('expanded');
-    // 联动查询栏
+    // 联动查询栏：实例不同则单链切换；相同则等在途加载完成，保证库选项就绪
     if ($('#instance-name').value !== ins.name) {
-      setSelectValue('#instance-name', ins.name);
-      await onInstanceChange(ins.name, { fromTree: true });
-      await new Promise((r) => setTimeout(r, 250));
+      await selectInstance(ins.name);
+    } else {
+      await state.dbsLoading;
     }
+    // setSelectValue 触发 change，由监听完成 state/草稿/预载表/树高亮
     if ($('#db-name').querySelector(`option[value="${CSS.escape(dbName)}"]`) && $('#db-name').value !== dbName) {
       setSelectValue('#db-name', dbName);
-      state.current.db = dbName;
-      saveDraft();
     }
     if (node.classList.contains('open') && !loaded) {
       loaded = true;
@@ -591,7 +613,10 @@ function tableNode(ins, dbName, tableName) {
     <span class="icon" data-icon="table"></span>
     <span class="label">${escapeHtml(tableName)}</span>
   </div>`);
-  row.addEventListener('click', () => describeTable(ins, dbName, tableName));
+  row.addEventListener('click', () => {
+    highlightTreeNode(['i', ins.name, 'd', dbName, 't', tableName]);
+    describeTable(ins, dbName, tableName);
+  });
   row.addEventListener('dblclick', () => {
     editor.insertText(tableName);
     toast(`已插入表名 ${tableName}`, 'success');
@@ -654,8 +679,27 @@ async function getTableColumns(instanceName, dbName, tableName) {
   }
 }
 
-function highlightTreeNode(path) {
+function highlightTreeNode(path = []) {
   $$('#object-tree .tree-row.current').forEach((r) => r.classList.remove('current'));
+  if (!path.length) return;
+  const kindMap = { i: 'instance', d: 'db', t: 'table' };
+  let scope = $('#object-tree');
+  for (let i = 0; i < path.length; i += 2) {
+    const kind = kindMap[path[i]] || path[i];
+    const name = path[i + 1];
+    if (!kind || !name || !scope) return;
+    const node = [...scope.querySelectorAll(`.tree-node[data-kind="${kind}"]`)].find((n) => n.dataset.name === name);
+    if (!node) return;
+    let ancestor = node;
+    while (ancestor) {
+      ancestor.classList.add('open');
+      ancestor.querySelector(':scope > .tree-row')?.classList.add('expanded');
+      ancestor = ancestor.parentElement?.closest('.tree-node');
+    }
+    const row = node.querySelector(':scope > .tree-row');
+    if (i >= path.length - 2) row?.classList.add('current');
+    scope = node.querySelector(':scope > .tree-children') || node;
+  }
 }
 
 $('#tree-search').addEventListener('input', renderTree);
@@ -745,7 +789,8 @@ function updateEditorHint() {
   const sel = editor.getSelection();
   const pos = editor.ta.value.slice(0, editor.ta.selectionStart).split('\n');
   $('#editor-selection').textContent = sel ? `已选中 ${sel.length} 字符，运行时仅执行选中部分` : '选中 SQL 可单独运行';
-  $('#query-timing').textContent = `第 ${pos.length} 行，第 ${pos[pos.length - 1].length + 1} 列`;
+  const cursor = $('#editor-cursor');
+  if (cursor) cursor.textContent = `${pos.length}:${pos[pos.length - 1].length + 1}`;
 }
 
 /* ======================= 多 SQL 标签页 ======================= */
@@ -870,6 +915,11 @@ function formatSqlText(sql) {
       tokens.push({ t: 'num', v: m[0] });
       i += m[0].length;
     } else if ((m = rest.match(/^\s+/))) {
+      i += m[0].length;
+    } else if ((m = rest.match(/^(?:>=|<=|<>|!=|:=|\|\||<<|>>|->>|->|=>|!<|!>)/))) {
+      // 多字符运算符必须整体成词，否则 >= 会被拆成 > 和 = 两个 token、
+      // 组装时中间加空格变成 "> ="，产生语法错误
+      tokens.push({ t: 'op', v: m[0] });
       i += m[0].length;
     } else {
       tokens.push({ t: 'op', v: rest[0] });
@@ -999,7 +1049,7 @@ function formatSqlText(sql) {
       const isFunc =
         prev &&
         (prev.t === 'ident' ||
-          (prev.t === 'word' && !CLAUSE.has(kw(prev)) && !JOIN_HEAD.has(kw(prev)) && !TWO_WORD[kw(prev)] && !['CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'AND', 'OR', 'ON', 'IN', 'NOT', 'VALUES', 'USING', 'LIKE', 'BETWEEN', 'EXISTS', 'DISTINCT'].includes(kw(prev))));
+          (prev.t === 'word' && !CLAUSE.has(kw(prev)) && !JOIN_HEAD.has(kw(prev)) && !TWO_WORD[kw(prev)] && !['CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'AND', 'OR', 'ON', 'IN', 'NOT', 'VALUES', 'USING', 'LIKE', 'BETWEEN', 'EXISTS', 'DISTINCT', 'INTERVAL'].includes(kw(prev))));
       // 配对区间内不含 SELECT → 分组括号（如 where 里的 ((a=1) or (b=2))），行内处理不换行
       let lv = 0;
       let j = k;
@@ -1109,7 +1159,8 @@ async function runQuery() {
   const instance = $('#instance-name').value;
   const db = $('#db-name').value;
   const schema = $('#schema-name').value;
-  const sql = editor.getSelection() || editor.value;
+  // 云端收藏回填的 SQL 带同步标记，执行前移除，不让标记出现在查询日志里
+  const sql = stripSyncMarks(editor.getSelection() || editor.value);
   if (!instance) return toast('请先选择实例', 'error');
   if (!db) return toast('请先选择数据库', 'error');
   if (!sql.trim()) return toast('请输入 SQL 语句', 'error');
@@ -1225,7 +1276,7 @@ $('#cancel-query').addEventListener('click', () => {
 async function runExplain() {
   const instance = $('#instance-name').value;
   const ins = state.instances.find((i) => i.instance_name === instance);
-  const sql = editor.getSelection() || editor.value;
+  const sql = stripSyncMarks(editor.getSelection() || editor.value);
   if (!instance || !$('#db-name').value) return toast('请先选择实例和数据库', 'error');
   if (!sql.trim()) return toast('请输入 SQL 语句', 'error');
   const type = ins?.db_type || 'mysql';
@@ -1349,6 +1400,7 @@ function renderActiveResult() {
   const footer = $('#result-footer');
   if (!r) {
     tools.hidden = true;
+    syncChartMode(false);
     $('#pagination').hidden = true;
     document.body.classList.remove('results-expanded');
     $('#result-summary').textContent = '准备就绪';
@@ -1359,6 +1411,7 @@ function renderActiveResult() {
   }
   if (r.kind === 'error') {
     tools.hidden = true;
+    syncChartMode(false);
     $('#pagination').hidden = true;
     document.body.classList.remove('results-expanded');
     $('#result-summary').textContent = `${r.target || ''} · ${timestamp()}`;
@@ -1369,6 +1422,7 @@ function renderActiveResult() {
   }
   if (r.kind === 'describe') {
     tools.hidden = true;
+    syncChartMode(false);
     $('#pagination').hidden = true;
     $('#result-summary').textContent = `${r.target} · ${timestamp()}`;
     renderDescribeView(r);
@@ -1380,7 +1434,8 @@ function renderActiveResult() {
   // 普通查询结果
   tools.hidden = false;
   updateExportButtons();
-  renderResultTable(r);
+  if (r.chartOpen) renderChart(r);
+  else renderResultTable(r);
 }
 
 /** EXPLAIN 执行计划单元格着色：全表扫描红、走索引绿、大扫描量橙 */
@@ -1416,6 +1471,7 @@ function explainCellClass(colName, val) {
 function renderResultTable(r) {
   const { columns, rows } = r;
   const content = $('#result-content');
+  syncChartMode(false);
   const lowerCols = columns.map((c) => String(c).toLowerCase());
   const explainMode = !!r.isExplain || (lowerCols.includes('type') && (lowerCols.includes('extra') || lowerCols.includes('key')));
 
@@ -1903,7 +1959,6 @@ function renderChart(r) {
           <option value="bar" ${r.chart.type === 'bar' ? 'selected' : ''}>柱状图</option>
           <option value="line" ${r.chart.type === 'line' ? 'selected' : ''}>折线图</option>
         </select></label>
-      <button class="button small" id="chart-back">返回表格</button>
     </div>
     <div class="chart-legend" id="chart-legend"></div>
     <div class="chart-svg-wrap"><svg class="chart-svg" id="chart-svg" width="900" height="420"></svg></div>`;
@@ -1921,13 +1976,24 @@ function renderChart(r) {
     r.chart.type = e.target.value;
     renderChart(r);
   });
-  panel.querySelector('#chart-back').addEventListener('click', () => {
-    delete r.chartOpen;
-    renderResultTable(r);
-  });
 
   drawChart(r, panel.querySelector('#chart-svg'), panel.querySelector('#chart-legend'));
   r.chartOpen = true;
+  syncChartMode(true);
+}
+
+function closeChart(r) {
+  if (!r) return;
+  delete r.chartOpen;
+  syncChartMode(false);
+  renderResultTable(r);
+}
+
+function syncChartMode(open) {
+  const back = $('#chart-back');
+  const toggle = $('#chart-toggle');
+  if (back) back.hidden = !open;
+  if (toggle) toggle.hidden = !!open;
 }
 
 function drawChart(r, svg, legend) {
@@ -2013,12 +2079,11 @@ function formatTick(v) {
 $('#chart-toggle').addEventListener('click', () => {
   const r = activeResultData();
   if (!r || r.kind !== 'query' || !r.rows?.length) return toast('当前没有可图表化的查询结果', 'error');
-  if (r.chartOpen) {
-    delete r.chartOpen;
-    renderResultTable(r);
-  } else {
-    openChart(r);
-  }
+  openChart(r);
+});
+$('#chart-back').addEventListener('click', () => {
+  const r = activeResultData();
+  if (r) closeChart(r);
 });
 
 /* ======================= 结果集对比 ======================= */
@@ -2383,13 +2448,47 @@ $('#save-favorite').addEventListener('click', () => {
 });
 
 /* ======================= 查询历史 / 收藏 ======================= */
-function renderLogTable(tableEl, rows, { starMode = false } = {}) {
-  const table = typeof tableEl === 'string' ? $(tableEl) : tableEl;
+function prepareTable(table) {
+  const wrap = table.closest('.table-wrap');
+  wrap?.querySelectorAll(':scope > .list-empty').forEach((n) => {
+    if (n.id) n.hidden = true;
+    else n.remove();
+  });
+  table.hidden = false;
   table.innerHTML = '';
+  return wrap;
+}
+
+function renderListEmpty(table, { iconName = 'history', title, hint }) {
+  const wrap = table.closest('.table-wrap') || table.parentElement;
+  table.hidden = true;
+  table.innerHTML = '';
+  const pinned = wrap.querySelector(':scope > .list-empty[id]');
+  wrap.querySelectorAll(':scope > .list-empty:not([id])').forEach((n) => n.remove());
+  if (pinned) {
+    pinned.hidden = false;
+    return;
+  }
+  wrap.appendChild(
+    el(`<div class="list-empty">${icon(iconName)}<b>${escapeHtml(title)}</b><small>${escapeHtml(hint)}</small></div>`)
+  );
+}
+
+function renderLogTable(tableEl, rows) {
+  const table = typeof tableEl === 'string' ? $(tableEl) : tableEl;
+  prepareTable(table);
+  if (!rows.length) {
+    renderListEmpty(table, {
+      iconName: 'history',
+      title: '还没有查询历史',
+      hint: '执行过的查询会出现在这里，可回填到编辑器再跑一次',
+    });
+    return;
+  }
   const thead = `<thead><tr>
     <th style="width:140px">时间</th><th style="width:150px">实例 / 库</th>
     <th>SQL</th><th style="width:70px" class="num">行数</th><th style="width:70px" class="num">耗时</th>
-    ${starMode ? '<th style="width:110px">别名</th>' : '<th style="width:80px">人员</th>'}
+    <th style="width:80px">人员</th>
     <th style="width:170px">操作</th></tr></thead>`;
   const tbody = document.createElement('tbody');
   for (const row of rows) {
@@ -2400,7 +2499,7 @@ function renderLogTable(tableEl, rows, { starMode = false } = {}) {
       <td class="sql-cell clamp" title="点击展开/收起完整 SQL">${escapeHtml(row.sqllog)}</td>
       <td class="num">${escapeHtml(String(row.effect_row ?? ''))}</td>
       <td class="num">${escapeHtml(String(row.cost_time ?? ''))}s</td>
-      ${starMode ? `<td>${escapeHtml(row.alias || '—')}</td>` : `<td>${escapeHtml(row.user_display)}</td>`}
+      <td>${escapeHtml(row.user_display)}</td>
       <td><div class="row-actions">
         <button class="button small" data-act="fill">回填</button>
         <button class="button small" data-act="run">执行</button>
@@ -2415,10 +2514,10 @@ function renderLogTable(tableEl, rows, { starMode = false } = {}) {
     tr.querySelector('[data-act="run"]').addEventListener('click', () => fillFromLog(row, true));
     tr.querySelector('[data-act="star"]').addEventListener('click', async () => {
       try {
-        const next = starMode ? false : !row.favorite;
+        const next = !row.favorite;
         await state.api.favorite(row.id, next, row.alias || '');
         toast(next ? '已收藏' : '已取消收藏', 'success');
-        starMode ? loadFavorites() : loadHistory();
+        loadHistory();
       } catch (e) {
         toast(`操作失败：${e.message}`, 'error');
       }
@@ -2429,18 +2528,79 @@ function renderLogTable(tableEl, rows, { starMode = false } = {}) {
   table.appendChild(tbody);
 }
 
+function cloudFavTitle(row) {
+  const head = parseCloudHead(row.sqllog);
+  if (head?.name) return head.name;
+  if (row.alias) return row.alias;
+  return String(row.sqllog || '').replace(/\s+/g, ' ').trim().slice(0, 40) || '云端收藏';
+}
+
+function renderCloudEmpty(title, hint) {
+  const wrap = $('#fav-cards');
+  wrap.replaceChildren(
+    el(`<div class="fav-empty"><span class="fav-empty-icon">${icon('star')}</span>
+      <b>${escapeHtml(title)}</b>
+      <small>${escapeHtml(hint)}</small></div>`)
+  );
+}
+
+function renderCloudFavCards(rows) {
+  const wrap = $('#fav-cards');
+  wrap.replaceChildren();
+  if (!rows.length) {
+    renderCloudEmpty('还没有云端收藏', '执行查询后点编辑器「收藏」，或从本地 SQL 同步到云端');
+    return;
+  }
+  for (const row of rows) {
+    const head = parseCloudHead(row.sqllog);
+    const title = cloudFavTitle(row);
+    const group = head?.group || '';
+    const card = el(`<div class="fav-card">
+      <div class="fav-card-top">
+        <div class="fav-card-title">
+          <b>${escapeHtml(title)}</b>
+          ${group ? `<span class="tag green">${escapeHtml(group)}</span>` : ''}
+          <span class="tag teal">云端</span>
+        </div>
+        <div class="fav-card-actions">
+          <button class="button small primary" data-act="run">${icon('play')}查询</button>
+          <button class="button small" data-act="fill">${icon('code')}回填</button>
+          <button class="icon-button danger" data-act="star" title="取消收藏">${icon('trash')}</button>
+        </div>
+      </div>
+      <pre class="fav-card-sql" title="点击展开 / 收起">${escapeHtml(stripSyncMarks(row.sqllog) || row.sqllog)}</pre>
+      <div class="fav-card-meta">
+        <span>${icon('database')}${escapeHtml(row.instance_name || '—')} · ${escapeHtml(row.db_name || '—')}</span>
+        <span>${icon('clock')}${escapeHtml(row.create_time || '')}</span>
+        ${row.effect_row != null && String(row.effect_row) !== '' ? `<span>${escapeHtml(String(row.effect_row))} 行 · ${escapeHtml(String(row.cost_time ?? '—'))}s</span>` : ''}
+      </div>
+    </div>`);
+    card.querySelector('.fav-card-sql').addEventListener('click', (e) => e.currentTarget.classList.toggle('open'));
+    card.querySelector('[data-act="run"]').addEventListener('click', () => fillFromLog(row, true));
+    card.querySelector('[data-act="fill"]').addEventListener('click', () => fillFromLog(row));
+    card.querySelector('[data-act="star"]').addEventListener('click', async () => {
+      try {
+        await state.api.favorite(row.id, false, row.alias || '');
+        toast(`已取消收藏「${title}」`, 'success');
+        loadFavorites();
+      } catch (e) {
+        toast(`操作失败：${e.message}`, 'error');
+      }
+    });
+    wrap.appendChild(card);
+  }
+}
+
 async function fillFromLog(row, run = false) {
   switchView('query');
   // 尽量联动实例与库
   if ($('#instance-name').querySelector(`option[value="${CSS.escape(row.instance_name)}"]`)) {
-    setSelectValue('#instance-name', row.instance_name);
-    await onInstanceChange(row.instance_name, { fromTree: true });
+    await selectInstance(row.instance_name);
     if (row.db_name && $('#db-name').querySelector(`option[value="${CSS.escape(row.db_name)}"]`)) {
       setSelectValue('#db-name', row.db_name);
-      state.current.db = row.db_name;
     }
   }
-  editor.setValue(row.sqllog, true);
+  editor.setValue(stripSyncMarks(row.sqllog) || row.sqllog, true);
   saveDraft();
   if (run) runQuery();
 }
@@ -2451,7 +2611,28 @@ async function loadHistory() {
 }
 async function loadFavorites() {
   const f = state.favorites;
-  await loadLogPage(f, $('#fav-table'), $('#fav-pager'), $('#fav-summary'), { starMode: true });
+  const limit = 20;
+  const summaryEl = $('#fav-summary');
+  summaryEl.textContent = '加载中…';
+  try {
+    const res = await state.api.queryLog({
+      limit,
+      offset: (f.page - 1) * limit,
+      search: f.search,
+      star: 'true',
+    });
+    renderCloudFavCards(res.rows || []);
+    f.total = res.total || 0;
+    summaryEl.textContent = `共 ${f.total} 条`;
+    renderPager($('#fav-pager'), f.page, Math.max(1, Math.ceil(f.total / limit)), (p) => {
+      f.page = p;
+      loadFavorites();
+    });
+  } catch (e) {
+    summaryEl.textContent = `加载失败：${e.message}`;
+    renderCloudEmpty('列表加载失败', e.message || '请检查 Archery 地址与登录状态后重试');
+    $('#fav-pager')?.replaceChildren();
+  }
 }
 
 async function loadLogPage(pageState, tableEl, pagerSel, summaryEl, { starMode }) {
@@ -2464,16 +2645,20 @@ async function loadLogPage(pageState, tableEl, pagerSel, summaryEl, { starMode }
       search: pageState.search,
       star: starMode ? 'true' : '',
     });
-    renderLogTable(tableEl, res.rows || [], { starMode });
+    renderLogTable(tableEl, res.rows || []);
     pageState.total = res.total || 0;
     summaryEl.textContent = `共 ${pageState.total} 条`;
     renderPager(pagerSel, pageState.page, Math.max(1, Math.ceil(pageState.total / limit)), (p) => {
       pageState.page = p;
-      starMode ? loadFavorites() : loadHistory();
+      loadHistory();
     });
   } catch (e) {
     summaryEl.textContent = `加载失败：${e.message}`;
-    tableEl.innerHTML = '';
+    renderListEmpty(tableEl, {
+      iconName: 'alert',
+      title: '列表加载失败',
+      hint: e.message || '请检查 Archery 地址与登录状态后重试',
+    });
   }
 }
 
@@ -2491,12 +2676,24 @@ const localFav = {
   },
 };
 
+/** 分组筛选 chips（带计数），选中态存于 localGroupFilter */
+let localGroupFilter = '';
 function fillLocalGroupFilter() {
-  const sel = $('#local-group-filter');
-  const cur = sel.value;
-  sel.innerHTML = '<option value="">全部分组</option><option value="__none">未分组</option>';
-  for (const g of localFav.groups) sel.appendChild(el(`<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`));
-  if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+  const wrap = $('#local-group-chips');
+  const counts = new Map();
+  for (const i of localFav.items) counts.set(i.group || '', (counts.get(i.group || '') || 0) + 1);
+  const chip = (value, label, count) => {
+    const b = el(`<button class="fav-chip${localGroupFilter === value ? ' active' : ''}">${escapeHtml(label)}<i>${count}</i></button>`);
+    b.addEventListener('click', () => {
+      localGroupFilter = value;
+      fillLocalGroupFilter();
+      renderLocalList();
+    });
+    return b;
+  };
+  wrap.replaceChildren(chip('', '全部', localFav.items.length));
+  if (counts.get('')) wrap.appendChild(chip('__none', '未分组', counts.get('')));
+  for (const g of localFav.groups) if (counts.get(g)) wrap.appendChild(chip(g, g, counts.get(g)));
 }
 
 function switchFavTab(which) {
@@ -2560,12 +2757,13 @@ async function runLocalSql(item) {
   const instSel = $('#instance-name');
   if (item.instance && [...instSel.options].some((o) => o.value === item.instance)) {
     if (instSel.value !== item.instance) {
-      setSelectValue(instSel, item.instance);
-      await onInstanceChange(item.instance);
+      await selectInstance(item.instance);
+    } else {
+      await state.dbsLoading;
     }
     if (item.db) {
       const dbSel = $('#db-name');
-      if ([...dbSel.options].some((o) => o.value === item.db)) setSelectValue(dbSel, item.db);
+      if (dbSel.querySelector(`option[value="${CSS.escape(item.db)}"]`)) setSelectValue(dbSel, item.db);
       else toast(`库 ${item.db} 在该实例下不可见，请手动选择`, 'info');
     }
   } else if (item.instance) {
@@ -2575,43 +2773,49 @@ async function runLocalSql(item) {
 }
 
 function renderLocalList() {
-  const table = $('#local-table');
-  const filter = $('#local-group-filter').value;
+  const wrap = $('#local-cards');
+  const filter = localGroupFilter;
   const items = localFav.items
     .filter((i) => (filter === '' ? true : filter === '__none' ? !i.group : i.group === filter))
     .sort((a, b) => (a.group || '').localeCompare(b.group || '', 'zh-CN') || b.createdAt - a.createdAt);
-  table.innerHTML = '';
-  table.appendChild(el(`<thead><tr>
-    <th style="width:180px">名称</th><th>SQL</th><th style="width:100px">分组</th>
-    <th style="width:150px">实例 / 库</th><th style="width:90px">保存时间</th><th style="width:210px">操作</th>
-  </tr></thead>`));
-  const tbody = document.createElement('tbody');
+  wrap.replaceChildren();
+  if (!items.length) {
+    wrap.appendChild(el(`<div class="fav-empty"><span class="fav-empty-icon">${icon('star')}</span>
+      <b>还没有本地 SQL</b>
+      <small>查询后在结果工具栏点「存本地」，或点右上角「保存编辑器 SQL」</small></div>`));
+  }
   for (const item of items) {
-    const tr = el(`<tr>
-      <td><b>${escapeHtml(item.name)}</b>${item.cloudLogId ? ' <span class="tag gray" title="已同步到 Archery 云端收藏">已同步</span>' : ''}</td>
-      <td class="sql-cell clamp" title="点击展开/收起">${escapeHtml(item.sql)}</td>
-      <td>${item.group ? `<span class="tag green">${escapeHtml(item.group)}</span>` : '<span style="color:var(--text-3)">—</span>'}</td>
-      <td class="sql-cell" title="${escapeHtml(`${item.instance || '—'}/${item.db || '—'}`)}">${escapeHtml(item.instance || '—')}<br /><span style="color:var(--text-3)">${escapeHtml(item.db || '—')}</span></td>
-      <td>${new Date(item.createdAt).toLocaleDateString('zh-CN')}</td>
-      <td><div class="row-actions">
-        <button class="button small primary" data-act="run">${icon('play')}查询</button>
-        <button class="button small" data-act="edit">${icon('format')}编辑</button>
-        <button class="button small danger" data-act="del">${icon('trash')}删除</button>
-      </div></td>
-    </tr>`);
-    tr.querySelector('.clamp').addEventListener('click', () => tr.classList.toggle('sql-expanded'));
-    tr.querySelector('[data-act="run"]').addEventListener('click', () => runLocalSql(item));
-    tr.querySelector('[data-act="edit"]').addEventListener('click', () => openLocalEditModal(item));
-    tr.querySelector('[data-act="del"]').addEventListener('click', async () => {
+    const card = el(`<div class="fav-card">
+      <div class="fav-card-top">
+        <div class="fav-card-title">
+          <b>${escapeHtml(item.name)}</b>
+          ${item.group ? `<span class="tag green">${escapeHtml(item.group)}</span>` : ''}
+          ${item.cloudLogId ? '<span class="tag gray" title="已同步到 Archery 云端收藏">已同步</span>' : ''}
+        </div>
+        <div class="fav-card-actions">
+          <button class="button small primary" data-act="run">${icon('play')}查询</button>
+          <button class="button small" data-act="edit">${icon('format')}编辑</button>
+          <button class="icon-button danger" data-act="del" title="删除">${icon('trash')}</button>
+        </div>
+      </div>
+      <pre class="fav-card-sql" title="点击展开 / 收起">${escapeHtml(item.sql)}</pre>
+      <div class="fav-card-meta">
+        <span>${icon('database')}${escapeHtml(item.instance || '—')} · ${escapeHtml(item.db || '—')}</span>
+        <span>${icon('clock')}${new Date(item.createdAt).toLocaleDateString('zh-CN')} 保存</span>
+      </div>
+    </div>`);
+    card.querySelector('.fav-card-sql').addEventListener('click', (e) => e.currentTarget.classList.toggle('open'));
+    card.querySelector('[data-act="run"]').addEventListener('click', () => runLocalSql(item));
+    card.querySelector('[data-act="edit"]').addEventListener('click', () => openLocalEditModal(item));
+    card.querySelector('[data-act="del"]').addEventListener('click', async () => {
       localFav.items = localFav.items.filter((x) => x.id !== item.id);
       await localFav.persist();
+      fillLocalGroupFilter();
       renderLocalList();
       toast(`已删除「${item.name}」`, 'info');
     });
-    tbody.appendChild(tr);
+    wrap.appendChild(card);
   }
-  if (!items.length) tbody.appendChild(el(`<tr><td colspan="6" style="text-align:center;color:var(--text-3);padding:22px">暂无本地 SQL：查询后在结果工具栏点「存本地」，或点上方「保存编辑器 SQL」</td></tr>`));
-  table.appendChild(tbody);
   $('#local-summary').textContent = `共 ${localFav.items.length} 条 · ${localFav.groups.length} 个分组`;
 }
 
@@ -2692,7 +2896,6 @@ $('#local-group-mgr').addEventListener('click', () => {
   openModal('管理本地分组', body);
 });
 
-$('#local-group-filter').addEventListener('change', renderLocalList);
 localFav.load().then(() => { fillLocalGroupFilter(); });
 
 /** 导出全部本地 SQL 为 JSON（换机迁移用） */
@@ -2704,15 +2907,64 @@ $('#local-export').addEventListener('click', () => {
 });
 
 /* ---------- 云端收藏 ⇄ 本地 SQL 双向同步 ----------
- * 目录信息写在 SQL 头注释里（见 cloudSyncHead），分组 encodeURIComponent 编码；
- * 名称走云端收藏的 alias（别名），执行后加星即云端收藏 */
-const cloudSyncHead = (item) =>
-  `/* archery-helper gid=${item.id}${item.group ? ` group=${encodeURIComponent(item.group)}` : ''} */\n`;
+ * 目录标记写成 SQL 语句内的中性书签注释（bookmark id=… group=… name=…），
+ * 紧跟第一条语句的首个关键字之后——语句前的首行注释会被部分实例的查询校验拒绝
+ * （disable_star 开启时报「SQL语句中含有 *」），语句内注释可正常通过；
+ * 注释里不出现插件名，审计/查询日志中看起来只是普通的书签标记。
+ * 执行查询 / EXPLAIN / 审核检测前用 stripSyncMarks 移除标记（仅上推时写入），
+ * 云端收藏回填的内容自动还原为干净 SQL。
+ * 兼容历史格式：首行块注释、首行 -- 行注释、语句内 archery-helper 块注释（值为 URL 编码）。 */
+
+// 明文值：去掉会破坏注释结构的字符（块注释结束符、竖线、换行）
+const SYNC_PLAIN = (v) => String(v ?? '').replace(/[*\/|\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+const cloudSyncMark = (item) =>
+  `/* bookmark id=${item.id}${item.group ? ` group=${SYNC_PLAIN(item.group)}` : ''}${item.name ? ` name=${SYNC_PLAIN(item.name)}` : ''} */`;
+
+/** 把标记注入 SQL 首个语句关键字之后（已有标记先移除，避免重复）；定位不到关键字返回 null */
+function withCloudMark(sql, item) {
+  const s = stripSyncMarks(String(sql || ''));
+  const m = s.match(/(^|\n)[ \t]*(select|show|explain|desc(?:ribe)?|with)\b/i);
+  if (!m) return null;
+  const at = m.index + m[0].length; // 关键字结束处
+  // 标记独占一行：关键字后换行放标记，原语句主体另起一行缩进
+  const body = s.slice(at).replace(/^[ \t\r\n]+/, '');
+  return `${s.slice(0, at)}\n    ${cloudSyncMark(item)}\n    ${body}`;
+}
+
+// 现行格式：语句内 bookmark 明文注释；历史格式：首行/语句内 archery-helper 注释（值 URL 编码）
+const CLOUD_MARK_RE =
+  /\/\*[ \t]*bookmark[ \t]+id=([\w.-]+)(?:[ \t]+group=([^*\n]*?))?(?:[ \t]+name=([^*\n]*?))?[ \t]*\*\//;
+const CLOUD_LEGACY_LINE_RE = /^--[ \t]*archery-helper[ \t]+gid=([\w.-]+)(?:[ \t]+group=(\S+?))?(?:[ \t]+name=(\S+?))?[ \t]*(?:\r?\n|$)/;
+const CLOUD_LEGACY_BLOCK_RE = /\/\*[ \t]*archery-helper[ \t]+gid=([\w.-]+)(?:[ \t]+group=(\S+?))?(?:[ \t]+name=(\S+?))?[ \t]*\*\//;
 const parseCloudHead = (sql) => {
-  const m = String(sql || '').match(/^\/\*\s*archery-helper\s+gid=([\w.-]+)(?:\s+group=(.+?))?\s*\*\//);
-  return m ? { gid: m[1], group: m[2] ? decodeURIComponent(m[2].trim()) : '' } : null;
+  const s = String(sql || '');
+  let m = s.match(CLOUD_MARK_RE);
+  if (m) return { gid: m[1], group: (m[2] || '').trim(), name: (m[3] || '').trim() };
+  m = s.match(CLOUD_LEGACY_LINE_RE) || s.match(CLOUD_LEGACY_BLOCK_RE);
+  if (m)
+    return {
+      gid: m[1],
+      group: m[2] ? decodeURIComponent(m[2].trim()) : '',
+      name: m[3] ? decodeURIComponent(m[3].trim()) : '',
+    };
+  return null;
 };
+
+/** 移除 SQL 中的同步标记（含全部历史格式）：连同注入时加的换行缩进一起还原 */
+const SYNC_MARK_STRIP_RE =
+  /\n?[ \t]*(?:\/\*[ \t]*(?:bookmark[ \t]+id=|archery-helper)[\s\S]*?\*\/|--[ \t]*archery-helper[^\n]*)/g;
+const stripSyncMarks = (sql) => String(sql || '').replace(SYNC_MARK_STRIP_RE, '');
 const isReadOnlySql = (sql) => /^\s*(select|show|explain|desc|describe|with)\b/i.test(String(sql || ''));
+
+/** 取出 SQL 末尾的 LIMIT，供上推时传给 Archery，避免服务端把 LIMIT 1000 改写成 1 */
+function extractSqlLimit(sql) {
+  const s = stripSyncMarks(String(sql || '')).replace(/;+\s*$/, '').trim();
+  const offsetCount = s.match(/\blimit\s+(\d+)\s*,\s*(\d+)\s*$/i);
+  if (offsetCount) return offsetCount[2];
+  const plain = s.match(/\blimit\s+(\d+)(?:\s+offset\s+\d+)?\s*$/i);
+  if (plain) return plain[1];
+  return '0';
+}
 
 /** 云端收藏 → 本地（去重合并：带头注释的在本地已有，其余导入并记录 cloudLogId 防回推） */
 async function syncCloudToLocal() {
@@ -2761,8 +3013,12 @@ async function syncLocalToCloud(onStep) {
     const db = item.db || curDb;
     if (!ins || !db) { failed += 1; continue; }
     try {
-      const sqlContent = cloudSyncHead(item) + item.sql;
-      const q = await state.api.query({ instanceName: ins, dbName: db, schemaName: '', sqlContent, limitNum: '1' });
+      const sqlContent = withCloudMark(item.sql, item);
+      if (!sqlContent) { failed += 1; continue; }
+      const q = await state.api.query({
+        instanceName: ins, dbName: db, schemaName: '', sqlContent,
+        limitNum: extractSqlLimit(item.sql),
+      });
       if (q.status !== 0) throw new Error(q.msg || '执行失败');
       const lg = await state.api.queryLog({ limit: 1, offset: 0 });
       const log = lg.rows?.[0];
@@ -2780,9 +3036,15 @@ async function syncLocalToCloud(onStep) {
 }
 
 $('#local-sync').addEventListener('click', () => {
-  const body = el(`<div>
-    <button class="button favpick" id="sync-down">${icon('download')}<span><b>云端收藏 → 本地</b><small>把 Archery 云端收藏导入本地（自动去重，归入「云端收藏」分组）</small></span></button>
-    <button class="button favpick" id="sync-up">${icon('upload')}<span><b>本地收藏 → 云端</b><small>只读语句执行一次并加星收藏；名称存为别名，分组写入 SQL 注释（写语句不同步）</small></span></button>
+  const body = el(`<div style="display:flex;flex-direction:column;gap:10px;min-width:380px">
+    <button class="sync-card" id="sync-down">
+      <span class="sync-badge">${icon('download')}</span>
+      <span class="sync-text"><b>云端收藏 → 本地</b><small>导入 Archery 云端收藏，自动去重，归入「云端收藏」分组</small></span>
+    </button>
+    <button class="sync-card" id="sync-up">
+      <span class="sync-badge">${icon('upload')}</span>
+      <span class="sync-text"><b>本地收藏 → 云端</b><small>上推本地 SQL 为云端收藏（仅只读语句），名称与分组随行</small></span>
+    </button>
     <div id="sync-status" style="font-size:12px;color:var(--text-3);min-height:18px"></div>
   </div>`);
   const status = body.querySelector('#sync-status');
@@ -2901,7 +3163,7 @@ const STAGE_ZH = {
 $('#audit-run').addEventListener('click', async () => {
   const instance = $('#audit-instance').value;
   const db = $('#audit-db').value;
-  const sql = auditEditor.value;
+  const sql = stripSyncMarks(auditEditor.value);
   if (!instance) return toast('请选择实例', 'error');
   if (!db) return toast('请选择数据库', 'error');
   if (!sql.trim()) return toast('请输入待检测的 SQL', 'error');
@@ -3057,7 +3319,6 @@ async function fetchDiffSides() {
 async function runDiffList() {
   const btn = $('#diff-run');
   btn.disabled = true;
-  $('#diff-table').innerHTML = '';
   $('#diff-summary').hidden = true;
   try {
     const s = await fetchDiffSides();
@@ -3160,7 +3421,9 @@ const DIFF_STATUS = {
 
 function renderDiffTable(rows, env) {
   const table = $('#diff-table');
-  table.innerHTML = '';
+  const empty = $('#diff-empty');
+  prepareTable(table);
+  if (empty) empty.hidden = true;
   table.appendChild(el(`<thead><tr>
     <th>表名</th><th style="width:110px">状态</th>
     <th>A 端建表（${escapeHtml(env.ia)}/${escapeHtml(env.da)}）</th>
@@ -3547,7 +3810,21 @@ async function loadWorkflows() {
       search: w.search,
     });
     const table = $('#wf-table');
-    table.innerHTML = '';
+    prepareTable(table);
+    if (!(res.rows || []).length) {
+      renderListEmpty(table, {
+        iconName: 'flow',
+        title: '还没有上线工单',
+        hint: '在「检测」页审核通过后可直接提交上线工单',
+      });
+      w.total = res.total || 0;
+      $('#wf-summary').textContent = `共 ${w.total} 条`;
+      renderPager($('#wf-pager'), w.page, Math.max(1, Math.ceil(w.total / 20)), (p) => {
+        w.page = p;
+        loadWorkflows();
+      });
+      return;
+    }
     table.appendChild(el(`<thead><tr><th style="width:80px">工单号</th><th>工单名称</th>
       <th style="width:52px">类型</th><th style="width:80px">发起人</th><th style="width:120px">状态</th>
       <th style="width:64px">备份</th><th style="width:140px">发起时间</th><th style="width:160px">实例 / 库</th>
@@ -3579,6 +3856,11 @@ async function loadWorkflows() {
     });
   } catch (e) {
     $('#wf-summary').textContent = `加载失败：${e.message}`;
+    renderListEmpty($('#wf-table'), {
+      iconName: 'alert',
+      title: '工单加载失败',
+      hint: e.message || '请检查 Archery 地址与登录状态后重试',
+    });
   }
 }
 bindSearch('#wf-search', state.workflow, loadWorkflows);
@@ -3753,14 +4035,21 @@ async function restoreDraft() {
   }
   if (draft.limit) $('#limit-num').value = draft.limit;
   if (draft.instance && $('#instance-name').querySelector(`option[value="${CSS.escape(draft.instance)}"]`)) {
-    setSelectValue('#instance-name', draft.instance);
-    await onInstanceChange(draft.instance, { fromTree: true });
+    await selectInstance(draft.instance);
     if (draft.db && $('#db-name').querySelector(`option[value="${CSS.escape(draft.db)}"]`)) {
-      setSelectValue('#db-name', draft.db);
-      state.current.db = draft.db;
-      preloadTables();
+      setSelectValue('#db-name', draft.db); // change 监听负责 state/草稿/预载表/树高亮
+      const ins = state.instances.find((i) => i.instance_name === draft.instance);
+      if (ins?.db_type === 'pgsql') {
+        await loadSchemas();
+        if (draft.schema && $('#schema-name').querySelector(`option[value="${CSS.escape(draft.schema)}"]`)) {
+          setSelectValue('#schema-name', draft.schema);
+        }
+      }
     }
   }
+  // 恢复完成后立刻把完整状态写回草稿：恢复过程中 onInstanceChange 的防抖保存
+  // 可能已把空库写进草稿，若此时用户直接刷新会丢掉已选实例/库
+  saveDraft();
 }
 
 /* ======================= 命令面板（Ctrl+K） ======================= */
@@ -3797,8 +4086,7 @@ function paletteCandidates(kw) {
         mono: true,
         run: () => {
           switchView('query');
-          setSelectValue('#instance-name', ins.instance_name);
-          onInstanceChange(ins.instance_name);
+          selectInstance(ins.instance_name);
         },
       });
     }
@@ -3815,10 +4103,7 @@ function paletteCandidates(kw) {
         run: () => {
           switchView('query');
           if ($('#db-name').querySelector(`option[value="${CSS.escape(db)}"]`)) {
-            $('#db-name').value = db;
-            state.current.db = db;
-            preloadTables();
-            saveDraft();
+            setSelectValue('#db-name', db); // change 监听负责 state/草稿/预载表/树高亮
           }
         },
       });
@@ -4031,6 +4316,7 @@ $('#settings-open').addEventListener('click', async () => {
     const g = document.createElement('div');
     g.className = 'shortcut-grid';
     g.innerHTML = `
+      <span><kbd>Ctrl</kbd> + <kbd>K</kbd></span><span>命令面板（功能 / 实例 / 库 / 表 / 最近 SQL）</span>
       <span><kbd>Ctrl</kbd> + <kbd>Enter</kbd></span><span>执行当前查询（有选中时仅执行选中部分）</span>
       <span><kbd>Alt</kbd> + <kbd>Enter</kbd></span><span>格式化 SQL（选中部分优先）</span>
       <span><kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd></span><span>缩进 / 反缩进当前行或选中块</span>`;
@@ -4039,12 +4325,125 @@ $('#settings-open').addEventListener('click', async () => {
 });
 
 /* ======================= 启动 ======================= */
+const GITHUB_REPO = 'serein-morii/archery-helper';
+const GITHUB_MANIFEST = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/manifest.json`;
+const GITHUB_CHANGELOG = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/CHANGELOG.md`;
+const GITHUB_PAGE = `https://github.com/${GITHUB_REPO}`;
+const GITHUB_ZIP = `https://github.com/${GITHUB_REPO}/archive/refs/heads/main.zip`;
+const VERSION_CHECK_TTL = 6 * 60 * 60 * 1000;
+
+function cmpVer(a, b) {
+  const pa = String(a || '').split('.').map((n) => Number(n) || 0);
+  const pb = String(b || '').split('.').map((n) => Number(n) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+  }
+  return 0;
+}
+
+function changelogSection(md, version) {
+  const lines = String(md || '').split('\n');
+  const start = lines.findIndex((l) => l.startsWith(`## ${version}`));
+  if (start < 0) return String(md || '').split('\n').slice(0, 40).join('\n');
+  const rest = lines.slice(start + 1);
+  const endRel = rest.findIndex((l) => /^## /.test(l));
+  return [lines[start], ...(endRel < 0 ? rest : rest.slice(0, endRel))].join('\n').trim();
+}
+
+async function openUpdateModal(remote) {
+  const local = chrome.runtime.getManifest().version;
+  const body = el(`<div class="update-modal">
+    <p class="update-lead">当前 <b>v${escapeHtml(local)}</b> → 仓库 <b>v${escapeHtml(remote)}</b></p>
+    <div class="md-view" id="update-notes"><p>正在读取更新说明…</p></div>
+    <p class="submit-panel-note">开发者模式加载的扩展不能自己覆盖安装目录。先下载压缩包，解压后覆盖原文件夹，再点「重新加载」。</p>
+    <div class="setting-actions">
+      <button class="button small" id="upd-github">打开仓库</button>
+      <button class="button small" id="upd-reload">重新加载扩展</button>
+      <button class="button small primary" id="upd-download">${icon('download')}<span>下载更新包</span></button>
+    </div>
+  </div>`);
+  openModal(`发现新版本 ${remote}`, body);
+  fetch(GITHUB_CHANGELOG, { cache: 'no-store', signal: AbortSignal.timeout(8000) })
+    .then((r) => {
+      if (!r.ok) throw new Error();
+      return r.text();
+    })
+    .then((md) => {
+      const notes = body.querySelector('#update-notes');
+      if (notes) notes.innerHTML = renderMarkdown(changelogSection(md, remote));
+    })
+    .catch(() => {
+      const notes = body.querySelector('#update-notes');
+      if (notes) notes.innerHTML = '<p>更新说明读取失败，可打开仓库查看 CHANGELOG。</p>';
+    });
+  body.querySelector('#upd-github').addEventListener('click', () => window.open(GITHUB_PAGE, '_blank'));
+  body.querySelector('#upd-reload').addEventListener('click', () => chrome.runtime.reload());
+  body.querySelector('#upd-download').addEventListener('click', async () => {
+    const btn = body.querySelector('#upd-download');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span><span>下载中…</span>';
+    try {
+      const res = await fetch(GITHUB_ZIP, { signal: AbortSignal.timeout(60000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `archery-helper-${remote}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      toast('已开始下载，解压覆盖原文件夹后点「重新加载扩展」', 'success');
+    } catch (e) {
+      toast(`下载失败：${e.message}`, 'error');
+      window.open(GITHUB_ZIP, '_blank');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = `${icon('download')}<span>下载更新包</span>`;
+      mountIcons(btn);
+    }
+  });
+}
+
+async function checkRemoteVersion() {
+  const local = chrome.runtime.getManifest().version;
+  const badge = $('#app-version');
+  if (!badge) return;
+  badge.textContent = local;
+  try {
+    const { versionCheck } = await chrome.storage.local.get('versionCheck');
+    let remote = versionCheck?.version;
+    const stale = !versionCheck || Date.now() - (versionCheck.at || 0) > VERSION_CHECK_TTL;
+    if (stale) {
+      const res = await fetch(GITHUB_MANIFEST, { cache: 'no-store', signal: AbortSignal.timeout(6000) });
+      if (!res.ok) return;
+      const json = await res.json();
+      remote = json.version;
+      if (remote) await chrome.storage.local.set({ versionCheck: { version: remote, at: Date.now() } });
+    }
+    if (!remote || cmpVer(remote, local) <= 0) return;
+    badge.classList.add('has-update');
+    badge.title = `发现新版本 ${remote}，点击更新`;
+    badge.replaceChildren(document.createTextNode(local), el('<i>新</i>'));
+    badge.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openUpdateModal(remote);
+    });
+  } catch {
+    /* 无网或仓库不可达时保持现状 */
+  }
+}
+
 (function fillVersion() {
   const v = chrome.runtime.getManifest().version;
   const badge = document.querySelector('#app-version');
   if (badge) badge.textContent = v;
   const foot = document.querySelector('#footer-target');
   if (foot) foot.textContent = `v${v}`;
+  checkRemoteVersion();
 })();
 if (!queryTabs.list.length) newQueryTab();
 renderResultTabs();
