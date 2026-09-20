@@ -181,6 +181,39 @@ kbd {
 .header-divider { width: 1px; height: 18px; background: var(--border); }
 .header-location { color: var(--text-3); font-size: 12px; font-family: var(--mono); }
 .header-end { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+/* 顶栏搜索框：点击唤起 Ctrl+K 命令面板 */
+.header-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 8px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text-3);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.13s ease;
+  white-space: nowrap;
+}
+.header-search:hover {
+  border-color: var(--border-strong);
+  background: var(--panel);
+  color: var(--text-2);
+  box-shadow: var(--shadow-sm);
+}
+.header-search .icon { width: 13px; height: 13px; flex: none; }
+.header-search kbd {
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 5px;
+  background: var(--panel);
+  color: var(--text-3);
+}
 .avatar {
   width: 29px;
   height: 29px;

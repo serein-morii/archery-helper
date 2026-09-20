@@ -4244,6 +4244,8 @@ $('#palette-input').addEventListener('input', (e) => {
   palette.index = 0;
   renderPalette();
 });
+/* 顶栏搜索框：点击唤起命令面板（与 Ctrl+K 同入口） */
+$('#header-search').addEventListener('click', openPalette);
 $('#palette-input').addEventListener('keydown', (e) => {
   if (e.key === 'ArrowDown') {
     e.preventDefault();
