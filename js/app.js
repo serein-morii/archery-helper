@@ -2588,7 +2588,7 @@ function renderLocalList() {
   const tbody = document.createElement('tbody');
   for (const item of items) {
     const tr = el(`<tr>
-      <td><b>${escapeHtml(item.name)}</b></td>
+      <td><b>${escapeHtml(item.name)}</b>${item.cloudLogId ? ' <span class="tag gray" title="已同步到 Archery 云端收藏">已同步</span>' : ''}</td>
       <td class="sql-cell clamp" title="点击展开/收起">${escapeHtml(item.sql)}</td>
       <td>${item.group ? `<span class="tag green">${escapeHtml(item.group)}</span>` : '<span style="color:var(--text-3)">—</span>'}</td>
       <td class="sql-cell" title="${escapeHtml(`${item.instance || '—'}/${item.db || '—'}`)}">${escapeHtml(item.instance || '—')}<br /><span style="color:var(--text-3)">${escapeHtml(item.db || '—')}</span></td>
@@ -2701,6 +2701,110 @@ $('#local-export').addEventListener('click', () => {
   const payload = { version: 1, exportedAt: new Date().toISOString(), groups: localFav.groups, items: localFav.items };
   download(`本地SQL收藏-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(payload, null, 2), 'application/json');
   toast(`已导出 ${localFav.items.length} 条本地 SQL`, 'success');
+});
+
+/* ---------- 云端收藏 ⇄ 本地 SQL 双向同步 ----------
+ * 目录信息写在 SQL 头注释里（见 cloudSyncHead），分组 encodeURIComponent 编码；
+ * 名称走云端收藏的 alias（别名），执行后加星即云端收藏 */
+const cloudSyncHead = (item) =>
+  `/* archery-helper gid=${item.id}${item.group ? ` group=${encodeURIComponent(item.group)}` : ''} */\n`;
+const parseCloudHead = (sql) => {
+  const m = String(sql || '').match(/^\/\*\s*archery-helper\s+gid=([\w.-]+)(?:\s+group=(.+?))?\s*\*\//);
+  return m ? { gid: m[1], group: m[2] ? decodeURIComponent(m[2].trim()) : '' } : null;
+};
+const isReadOnlySql = (sql) => /^\s*(select|show|explain|desc|describe|with)\b/i.test(String(sql || ''));
+
+/** 云端收藏 → 本地（去重合并：带头注释的在本地已有，其余导入并记录 cloudLogId 防回推） */
+async function syncCloudToLocal() {
+  const res = await state.api.queryLog({ limit: 100, offset: 0, star: 'true' });
+  const rows = res.rows || [];
+  const knownCloud = new Set(localFav.items.map((i) => i.cloudLogId).filter(Boolean));
+  let added = 0, wasLocal = 0;
+  const imports = [];
+  for (const row of rows) {
+    const head = parseCloudHead(row.sqllog);
+    if (head) { wasLocal += 1; continue; }          // 本地同步过去的，本地就是源头
+    if (knownCloud.has(row.id)) continue;            // 之前导入过
+    imports.push({
+      id: `c${row.id}`,
+      name: (row.alias || String(row.sqllog).replace(/\s+/g, ' ').slice(0, 40) || '云端收藏').slice(0, 60),
+      sql: String(row.sqllog || ''),
+      instance: row.instance_name || '',
+      db: row.db_name || '',
+      group: '云端收藏',
+      cloudLogId: row.id,
+      createdAt: Date.now(),
+    });
+    added += 1;
+  }
+  if (added) {
+    if (!localFav.groups.includes('云端收藏')) localFav.groups.push('云端收藏');
+    localFav.items = [...imports, ...localFav.items];
+    await localFav.persist();
+    fillLocalGroupFilter();
+    renderLocalList();
+  }
+  return { added, total: rows.length, wasLocal };
+}
+
+/** 本地 → 云端：只读语句执行一次产生查询日志，加星 + 名称作别名；分组写进 SQL 头注释 */
+async function syncLocalToCloud(onStep) {
+  const curIns = $('#instance-name').value;
+  const curDb = $('#db-name').value;
+  const todo = localFav.items.filter((i) => !i.cloudLogId);
+  let pushed = 0, skippedRo = 0, failed = 0, done = 0;
+  for (const item of todo) {
+    done += 1;
+    onStep?.(done, todo.length, item.name);
+    if (!isReadOnlySql(item.sql)) { skippedRo += 1; continue; }
+    const ins = item.instance || curIns;
+    const db = item.db || curDb;
+    if (!ins || !db) { failed += 1; continue; }
+    try {
+      const sqlContent = cloudSyncHead(item) + item.sql;
+      const q = await state.api.query({ instanceName: ins, dbName: db, schemaName: '', sqlContent, limitNum: '1' });
+      if (q.status !== 0) throw new Error(q.msg || '执行失败');
+      const lg = await state.api.queryLog({ limit: 1, offset: 0 });
+      const log = lg.rows?.[0];
+      if (!log) throw new Error('未找到执行日志');
+      await state.api.favorite(log.id, true, item.name.slice(0, 60));
+      item.cloudLogId = log.id;
+      pushed += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+  if (pushed) await localFav.persist();
+  renderLocalList();
+  return { pushed, skippedRo, failed };
+}
+
+$('#local-sync').addEventListener('click', () => {
+  const body = el(`<div>
+    <button class="button favpick" id="sync-down">${icon('download')}<span><b>云端收藏 → 本地</b><small>把 Archery 云端收藏导入本地（自动去重，归入「云端收藏」分组）</small></span></button>
+    <button class="button favpick" id="sync-up">${icon('upload')}<span><b>本地收藏 → 云端</b><small>只读语句执行一次并加星收藏；名称存为别名，分组写入 SQL 注释（写语句不同步）</small></span></button>
+    <div id="sync-status" style="font-size:12px;color:var(--text-3);min-height:18px"></div>
+  </div>`);
+  const status = body.querySelector('#sync-status');
+  const guard = async (btn, fn) => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    status.textContent = '同步中，请稍候…';
+    try {
+      const r = await fn((d, t, name) => { status.textContent = `上推 ${d}/${t}：${name}`; });
+      status.textContent = '';
+      closeModal();
+      if (r.added !== undefined) toast(`云端 → 本地完成：导入 ${r.added} 条（云端共 ${r.total} 条）`, 'success');
+      else toast(`本地 → 云端完成：上推 ${r.pushed} 条${r.skippedRo ? `，跳过写语句 ${r.skippedRo} 条` : ''}${r.failed ? `，失败 ${r.failed} 条` : ''}`, r.pushed || !r.failed ? 'success' : 'error');
+    } catch (e) {
+      status.textContent = '';
+      btn.disabled = false;
+      toast(`同步失败：${e.message}`, 'error');
+    }
+  };
+  body.querySelector('#sync-down').addEventListener('click', (e) => guard(e.currentTarget, syncCloudToLocal));
+  body.querySelector('#sync-up').addEventListener('click', (e) => guard(e.currentTarget, syncLocalToCloud));
+  openModal('云端 ⇄ 本地收藏同步', body);
 });
 
 /** 导入 JSON：按 名称+SQL+分组 去重合并，分组并入 */
