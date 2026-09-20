@@ -1061,7 +1061,15 @@ dialog#modal::backdrop { background: rgba(8, 12, 18, 0.55); backdrop-filter: blu
 .setting-row { display: flex; flex-direction: column; gap: 6px; }
 .setting-row > span { font-size: 12px; font-weight: 600; color: var(--text-2); }
 .setting-row input { width: 100%; }
-.setting-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.setting-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+.setting-ver-status {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.5;
+}
+.setting-ver-status.ok { color: var(--success); }
+.setting-ver-status.err { color: var(--danger); }
 .shortcut-grid { display: grid; grid-template-columns: auto 1fr; gap: 10px 18px; font-size: 12.5px; align-items: center; }
 .shortcut-grid span:nth-child(odd) { white-space: nowrap; }
 .shortcut-grid span:nth-child(even) { color: var(--text-2); }

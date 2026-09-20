@@ -4274,10 +4274,12 @@ $('#settings-open').addEventListener('click', async () => {
     <label class="setting-row"><span>OTP 密钥（如有）</span>
       <input id="set-totp" type="password" value="${escapeHtml(cfg.totpSecret || '')}" placeholder="otpauth:// 链接或 base32，两步验证自动登录" autocomplete="off" spellcheck="false"></label>
     <div class="setting-actions">
+      <button class="button small" id="set-check-ver">检测版本</button>
       <button class="button small" id="set-changelog">更新日志</button>
       <button class="button small" id="set-shortcut">快捷键</button>
       <button class="button small primary" id="set-save">保存并重连</button>
-    </div>`;
+    </div>
+    <p class="setting-ver-status" id="set-ver-status">当前版本 v${escapeHtml(chrome.runtime.getManifest().version)}</p>`;
   openModal('设置', body);
   body.querySelector('#set-save').addEventListener('click', async () => {
     const baseUrl = normalizeBase(body.querySelector('#set-url').value);
@@ -4303,6 +4305,30 @@ $('#settings-open').addEventListener('click', async () => {
     });
     closeModal();
     location.reload();
+  });
+  body.querySelector('#set-check-ver').addEventListener('click', async () => {
+    const btn = body.querySelector('#set-check-ver');
+    const status = body.querySelector('#set-ver-status');
+    btn.disabled = true;
+    const prev = btn.textContent;
+    btn.textContent = '检测中…';
+    status.textContent = '正在对照 GitHub 仓库…';
+    status.className = 'setting-ver-status';
+    try {
+      const r = await checkRemoteVersion({ force: true });
+      if (r.status === 'newer') {
+        openUpdateModal(r.remote);
+      } else if (r.status === 'current') {
+        status.textContent = `已是最新版本 v${r.local}`;
+        status.classList.add('ok');
+      } else {
+        status.textContent = `检测失败：${r.error || '无法访问 GitHub'}`;
+        status.classList.add('err');
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = prev;
+    }
   });
   body.querySelector('#set-changelog').addEventListener('click', async () => {
     try {
@@ -4407,33 +4433,54 @@ async function openUpdateModal(remote) {
   });
 }
 
-async function checkRemoteVersion() {
-  const local = chrome.runtime.getManifest().version;
+function markVersionBadge(local, remote) {
   const badge = $('#app-version');
   if (!badge) return;
-  badge.textContent = local;
-  try {
-    const { versionCheck } = await chrome.storage.local.get('versionCheck');
-    let remote = versionCheck?.version;
-    const stale = !versionCheck || Date.now() - (versionCheck.at || 0) > VERSION_CHECK_TTL;
-    if (stale) {
-      const res = await fetch(GITHUB_MANIFEST, { cache: 'no-store', signal: AbortSignal.timeout(6000) });
-      if (!res.ok) return;
-      const json = await res.json();
-      remote = json.version;
-      if (remote) await chrome.storage.local.set({ versionCheck: { version: remote, at: Date.now() } });
-    }
-    if (!remote || cmpVer(remote, local) <= 0) return;
-    badge.classList.add('has-update');
-    badge.title = `发现新版本 ${remote}，点击更新`;
-    badge.replaceChildren(document.createTextNode(local), el('<i>新</i>'));
+  badge.classList.add('has-update');
+  badge.title = `发现新版本 ${remote}，点击更新`;
+  badge.replaceChildren(document.createTextNode(local), el('<i>新</i>'));
+  if (!badge.dataset.updateBound) {
+    badge.dataset.updateBound = '1';
     badge.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      openUpdateModal(remote);
+      const ver = badge.dataset.remote;
+      if (ver) openUpdateModal(ver);
     });
-  } catch {
-    /* 无网或仓库不可达时保持现状 */
+  }
+  badge.dataset.remote = remote;
+}
+
+async function fetchRemoteManifestVersion() {
+  const res = await fetch(GITHUB_MANIFEST, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = await res.json();
+  const remote = json.version;
+  if (!remote) throw new Error('仓库 manifest 没有 version');
+  await chrome.storage.local.set({ versionCheck: { version: remote, at: Date.now() } });
+  return remote;
+}
+
+async function checkRemoteVersion({ force = false } = {}) {
+  const local = chrome.runtime.getManifest().version;
+  try {
+    let remote;
+    if (!force) {
+      const { versionCheck } = await chrome.storage.local.get('versionCheck');
+      remote = versionCheck?.version;
+      const stale = !versionCheck || Date.now() - (versionCheck.at || 0) > VERSION_CHECK_TTL;
+      if (stale) remote = await fetchRemoteManifestVersion();
+    } else {
+      remote = await fetchRemoteManifestVersion();
+    }
+    if (!remote) return { status: 'error', local, error: '未读到远程版本' };
+    if (cmpVer(remote, local) > 0) {
+      markVersionBadge(local, remote);
+      return { status: 'newer', local, remote };
+    }
+    return { status: 'current', local, remote };
+  } catch (e) {
+    return { status: 'error', local, error: e.message || '无法访问 GitHub' };
   }
 }
 
