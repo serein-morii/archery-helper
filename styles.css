@@ -292,7 +292,7 @@ body.sidebar-collapsed #sidebar-toggle:hover {
 .icon-button:hover { background: var(--panel-3); color: var(--text-1); }
 .icon-button:active { transform: scale(0.9); }
 .icon-button:disabled { opacity: 0.35; cursor: not-allowed; }
-.sidebar-search { margin: 0 12px 8px; }
+.sidebar-search { margin: 0 12px 10px; }
 .search-field {
   display: flex;
   align-items: center;
@@ -400,12 +400,12 @@ body.sidebar-collapsed #sidebar-toggle:hover {
 
 /* ---------- 工作区 ---------- */
 .workspace { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
-.view { flex: 1; min-height: 0; display: none; flex-direction: column; padding: 14px 16px 10px; gap: 12px; }
+.view { flex: 1; min-height: 0; display: none; flex-direction: column; padding: 14px 18px 12px; gap: 14px; }
 .view.active { display: flex; }
 
 .list-head { display: flex; align-items: center; gap: 12px; flex: none; }
 .list-head h1 {
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 800;
   margin: 0;
   letter-spacing: 0.2px;
@@ -576,11 +576,11 @@ input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft
 .query-bar {
   display: flex;
   align-items: flex-end;
-  gap: 10px;
+  gap: 12px;
   flex: none;
   flex-wrap: wrap;
 }
-.bar-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.bar-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .bar-field > span {
   font-size: 10.5px;
   font-weight: 600;
@@ -608,20 +608,20 @@ input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 7px 10px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   flex: none;
   background: var(--panel);
 }
-.toolbar-left, .toolbar-right { display: flex; align-items: center; gap: 5px; }
+.toolbar-left, .toolbar-right { display: flex; align-items: center; gap: 6px; }
 .editor-hint { font-size: 11px; color: var(--text-3); }
 
 .banner {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 10px 10px 0;
-  padding: 9px 13px;
+  gap: 10px;
+  margin: 12px 12px 0;
+  padding: 10px 14px;
   border-radius: 10px;
   background: var(--warn-soft);
   color: var(--warn);
@@ -631,7 +631,7 @@ input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft
 .banner .button { margin-left: auto; }
 .banner.login-banner { align-items: flex-start; }
 .banner-main { flex: 1; min-width: 0; }
-.banner-form { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.banner-form { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
 .banner-form input { height: 28px; width: 160px; background: var(--panel); border-color: color-mix(in srgb, var(--warn) 35%, var(--border)); }
 
 /* ---------- SQL 编辑器 ---------- */
@@ -708,7 +708,7 @@ html[data-theme="light"] .tok-op { color: #0f7173; }
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 10px 0;
+  padding: 8px 12px 0;
   flex: none;
   min-height: 40px;
   background: var(--panel);
@@ -852,7 +852,7 @@ html[data-theme="light"] .tok-op { color: #0f7173; }
 /* ---------- 审核结果 ---------- */
 .audit-summary {
   display: flex;
-  gap: 10px;
+  gap: 12px;
   align-items: center;
   padding: 11px 14px;
   border-bottom: 1px solid var(--border);
@@ -912,7 +912,7 @@ html[data-theme="light"] .tok-op { color: #0f7173; }
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 6px 18px;
+  padding: 7px 18px;
   color: var(--text-3);
   font-size: 11px;
   border-top: 1px solid var(--border);
@@ -1137,9 +1137,9 @@ body.results-expanded .editor-toolbar { display: none; }
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px 0;
+  padding: 8px 12px 0;
   flex: none;
-  min-height: 38px;
+  min-height: 40px;
 }
 .query-tabbar-top .result-tabs { flex: 1; }
 .autosave {
@@ -1171,7 +1171,7 @@ body.results-expanded .editor-toolbar { display: none; }
 .sidebar-modes {
   display: flex;
   gap: 4px;
-  margin: 0 12px 8px;
+  margin: 0 12px 10px;
   background: var(--panel-2);
   border-radius: 9px;
   padding: 3px;
