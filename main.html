@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SQL 工作台 · Archery 助手</title>
+    <link rel="icon" href="icons/icon48.png" type="image/png" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <a class="brand" href="main.html">
+        <img class="brand-logo" src="icons/icon32.png" alt="" width="24" height="24" />
+        <span>Archery</span><span class="brand-sub">助手</span>
+        <span class="version" id="app-version"></span>
+      </a>
+      <span class="header-divider"></span>
+      <span class="header-location" id="server-label">SQL 工作台</span>
+      <div class="header-end">
+        <span id="connection" class="connection"><i></i>等待连接</span>
+        <span class="header-divider"></span>
+        <span id="avatar" class="avatar">A</span>
+        <span id="user-name">未登录</span>
+      </div>
+    </header>
+
+    <div class="app-shell">
+      <nav class="rail" aria-label="主导航">
+        <div class="rail-group">
+          <button class="rail-button active" data-nav="query" title="SQL 工作台" aria-label="SQL 工作台">
+            <span data-icon="code"></span><small>查询</small>
+          </button>
+          <button class="rail-button" data-nav="history" title="查询历史" aria-label="查询历史">
+            <span data-icon="history"></span><small>历史</small>
+          </button>
+          <button class="rail-button" data-nav="favorites" title="SQL 收藏" aria-label="SQL 收藏">
+            <span data-icon="star"></span><small>收藏</small>
+          </button>
+          <button class="rail-button" data-nav="audit" title="SQL 审核检测" aria-label="SQL 审核检测">
+            <span data-icon="shield"></span><small>检测</small>
+          </button>
+          <button class="rail-button" data-nav="workflow" title="上线工单" aria-label="上线工单">
+            <span data-icon="flow"></span><small>工单</small>
+          </button>
+          <button class="rail-button" data-nav="diff" title="表结构对比" aria-label="表结构对比">
+            <span data-icon="rollback"></span><small>对比</small>
+          </button>
+          <button class="rail-button" data-nav="diag" title="容量与事务诊断" aria-label="容量与事务诊断">
+            <span data-icon="alert"></span><small>诊断</small>
+          </button>
+        </div>
+        <div class="rail-group">
+          <button class="rail-button" id="sidebar-toggle" title="收起/展开数据浏览器" aria-label="收起或展开数据浏览器">
+            <span data-icon="panel"></span><small>收起</small>
+          </button>
+          <button class="rail-button" id="theme-toggle" title="切换深浅主题" aria-label="切换深浅主题">
+            <span data-icon="moon"></span>
+          </button>
+          <button class="rail-button" id="settings-open" title="偏好设置" aria-label="偏好设置">
+            <span data-icon="settings"></span>
+          </button>
+          <span class="rail-footer">AR</span>
+        </div>
+      </nav>
+
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-title">
+          <h2>数据浏览器</h2>
+          <button class="icon-button" id="refresh-tree" title="刷新实例与对象" aria-label="刷新实例与对象">
+            <span data-icon="refresh"></span>
+          </button>
+        </div>
+        <div class="sidebar-modes" role="tablist" aria-label="浏览模式">
+          <button class="mode-btn active" id="mode-object" role="tab">对象</button>
+          <button class="mode-btn" id="mode-column" role="tab">字段</button>
+        </div>
+        <div class="sidebar-search search-field" id="object-search-wrap">
+          <span data-icon="search"></span>
+          <input id="tree-search" placeholder="搜索实例 / 库 / 表…" aria-label="搜索数据库对象" />
+        </div>
+        <div class="sidebar-search search-field" id="column-search-wrap" hidden>
+          <span data-icon="search"></span>
+          <input id="column-search" placeholder="搜字段名（当前库）…" aria-label="搜索字段" />
+        </div>
+        <div id="column-results" class="column-results" hidden></div>
+        <div class="object-heading"><span>数据库对象</span><span id="tree-total">—</span></div>
+        <div id="object-tree" class="object-tree"></div>
+        <div class="sidebar-tip">
+          <span data-icon="info"></span><span>点击表名查看建表语句<br />双击表名插入到编辑器</span>
+        </div>
+      </aside>
+      <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="调整数据浏览器宽度"
+        aria-orientation="vertical" tabindex="0"></div>
+
+      <main class="workspace">
+        <!-- ============ 查询工作台 ============ -->
+        <section class="view active" id="view-query">
+          <div class="query-bar">
+            <label class="bar-field grow">
+              <span>实例</span>
+              <select id="instance-name" class="select"></select>
+            </label>
+            <label class="bar-field">
+              <span>数据库</span>
+              <select id="db-name" class="select"><option value="">选择库</option></select>
+            </label>
+            <label class="bar-field" id="schema-field" hidden>
+              <span>模式</span>
+              <select id="schema-name" class="select"><option value="">选择 schema</option></select>
+            </label>
+            <label class="bar-field">
+              <span>Limit</span>
+              <select id="limit-num" class="select">
+                <option>100</option>
+                <option selected>1000</option>
+                <option>5000</option>
+                <option>10000</option>
+                <option value="0">不限</option>
+              </select>
+            </label>
+            <button class="button primary" id="execute" title="运行查询（Ctrl+Enter）">
+              <span data-icon="play"></span><span>运行查询</span>
+            </button>
+            <button class="button" id="explain" title="EXPLAIN 执行计划">
+              <span data-icon="eye"></span><span>执行计划</span>
+            </button>
+            <button class="button danger" id="cancel-query" hidden>
+              <span data-icon="stop"></span>停止加载
+            </button>
+          </div>
+
+          <section class="console-card">
+            <div class="query-tabbar-top">
+              <div id="query-tabs" class="result-tabs" role="tablist" aria-label="SQL 查询标签"></div>
+              <span class="autosave" id="autosave"><i></i>草稿自动保存</span>
+            </div>
+            <div class="editor-toolbar">
+              <div class="toolbar-left">
+                <button class="icon-button" id="format" title="格式化 SQL" aria-label="格式化 SQL">
+                  <span data-icon="format"></span>
+                </button>
+                <button class="icon-button" id="save-favorite" title="收藏最近一次执行的 SQL" aria-label="收藏">
+                  <span data-icon="star"></span>
+                </button>
+              </div>
+              <div class="toolbar-right">
+                <span id="editor-selection" class="editor-hint">选中 SQL 可单独运行</span>
+                <button class="icon-button" id="import-sql" title="导入 SQL 文件" aria-label="导入 SQL 文件">
+                  <span data-icon="upload"></span>
+                </button>
+                <button class="icon-button" id="download-sql" title="下载 SQL 文件" aria-label="下载 SQL 文件">
+                  <span data-icon="download"></span>
+                </button>
+              </div>
+            </div>
+            <div class="editor-area" id="editor"></div>
+            <div id="auth-banner" class="banner login-banner" hidden>
+              <span data-icon="info" style="flex:none;margin-top:1px"></span>
+              <div class="banner-main">
+                <div id="auth-banner-text">未登录或会话过期。</div>
+                <div class="banner-form">
+                  <input id="banner-user" type="text" placeholder="用户名" autocomplete="off" />
+                  <input id="banner-pass" type="password" placeholder="密码" autocomplete="new-password" />
+                  <input id="banner-totp" type="password" placeholder="TOTP 密钥（可选，实现全自动）" autocomplete="off" spellcheck="false" style="width:220px" />
+                  <input id="banner-otp" type="text" placeholder="6 位动态验证码" maxlength="6" autocomplete="one-time-code" hidden style="width:130px" />
+                  <button class="button small primary" id="banner-login">登录</button>
+                </div>
+              </div>
+              <button class="button small" id="retry-connect">重新检测</button>
+            </div>
+
+            <div class="result-tabbar">
+              <div id="result-tabs" class="result-tabs" role="tablist" aria-label="查询输出"></div>
+              <span id="query-timing" class="query-timing"></span>
+              <button class="icon-button" id="expand-results" title="放大/还原结果区" aria-label="放大或还原结果区">
+                <span data-icon="expand"></span>
+              </button>
+              <button class="icon-button" id="clear-results" title="清空全部结果" aria-label="清空全部结果">
+                <span data-icon="trash"></span>
+              </button>
+            </div>
+            <div id="result-tools" class="result-tools" hidden>
+              <div class="search-field">
+                <span data-icon="search"></span>
+                <input id="result-filter" aria-label="筛选当前页结果" placeholder="筛选当前页…" />
+              </div>
+              <span class="result-hint">点击列名排序 · 右键列头/行有惊喜</span>
+              <button class="button small" id="save-local" title="把当前结果的 SQL 命名保存到本地"><span data-icon="plus"></span>存本地</button>
+              <button class="button small" id="chart-toggle"><span data-icon="grid"></span>图表</button>
+              <button class="button small" id="compare-toggle"><span data-icon="copy"></span>对比</button>
+              <button class="button small" id="export-csv" hidden><span data-icon="download"></span>CSV</button>
+              <button class="button small" id="export-excel" hidden>Excel</button>
+              <button class="button small" id="export-json" hidden>JSON</button>
+            </div>
+            <div id="result-content" class="result-content" aria-live="polite"></div>
+            <div id="result-footer" class="result-footer">
+              <span id="result-summary">准备就绪</span>
+              <div class="pagination" id="pagination" hidden>
+                <label for="page-size">每页</label>
+                <select id="page-size" aria-label="每页行数">
+                  <option>50</option>
+                  <option selected>100</option>
+                  <option>200</option>
+                </select>
+                <button class="icon-button" id="prev-page" aria-label="上一页">
+                  <span data-icon="chevron" class="rotate-180"></span>
+                </button>
+                <span id="page-info">1 / 1</span>
+                <button class="icon-button" id="next-page" aria-label="下一页">
+                  <span data-icon="chevron"></span>
+                </button>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <!-- ============ 查询历史 / 收藏 ============ -->
+        <section class="view" id="view-history">
+          <div class="list-head">
+            <div>
+              <h1>查询历史</h1>
+              <p class="list-sub">最近的查询记录，点击「回填」把 SQL 放回编辑器。</p>
+            </div>
+            <div class="search-field wide">
+              <span data-icon="search"></span>
+              <input id="history-search" placeholder="搜索 SQL / 人员 / 别名…" />
+            </div>
+            <button class="icon-button" id="history-refresh" title="刷新"><span data-icon="refresh"></span></button>
+          </div>
+          <div class="table-wrap"><table class="data-table" id="history-table"></table></div>
+          <div class="list-footer"><span id="history-summary"></span>
+            <div class="pager" id="history-pager"></div>
+          </div>
+        </section>
+
+        <section class="view" id="view-favorites">
+          <div class="list-head">
+            <div>
+              <h1>SQL 收藏</h1>
+              <p class="list-sub">云端收藏同步 Archery；本地 SQL 仅存本机，可命名、分组、一键查询。</p>
+            </div>
+          </div>
+          <div class="sub-tabs" role="tablist" aria-label="收藏类型">
+            <button class="sub-tab active" id="favtab-cloud" role="tab">云端收藏</button>
+            <button class="sub-tab" id="favtab-local" role="tab">本地 SQL</button>
+          </div>
+          <div id="fav-cloud">
+            <div class="list-head" style="margin:10px 0 0">
+              <div class="search-field wide">
+                <span data-icon="search"></span>
+                <input id="fav-search" placeholder="搜索收藏…" />
+              </div>
+              <button class="icon-button" id="fav-refresh" title="刷新"><span data-icon="refresh"></span></button>
+            </div>
+            <div class="table-wrap"><table class="data-table" id="fav-table"></table></div>
+            <div class="list-footer"><span id="fav-summary"></span>
+              <div class="pager" id="fav-pager"></div>
+            </div>
+          </div>
+          <div id="fav-local" hidden>
+            <div class="local-bar">
+              <button class="button small primary" id="local-save-editor"><span data-icon="plus"></span>保存编辑器 SQL</button>
+              <button class="button small" id="local-group-mgr"><span data-icon="folder"></span>管理分组</button>
+              <select id="local-group-filter" class="select"><option value="">全部分组</option></select>
+              <button class="button small" id="local-export" title="导出为 JSON 文件，可迁移到其他电脑"><span data-icon="download"></span>导出</button>
+              <button class="button small" id="local-import" title="从导出的 JSON 文件导入"><span data-icon="upload"></span>导入</button>
+              <input type="file" id="local-import-file" accept=".json,application/json" hidden />
+              <span class="local-summary" id="local-summary"></span>
+            </div>
+            <div class="table-wrap"><table class="data-table" id="local-table"></table></div>
+          </div>
+        </section>
+
+        <!-- ============ SQL 审核检测 ============ -->
+        <section class="view" id="view-audit">
+          <div class="list-head">
+            <div>
+              <h1>SQL 审核检测</h1>
+              <p class="list-sub">发版前把 SQL 交给 goInception 预检：语法、风险、影响行数。</p>
+            </div>
+          </div>
+          <div class="query-bar">
+            <label class="bar-field grow">
+              <span>实例</span>
+              <select id="audit-instance" class="select"></select>
+            </label>
+            <label class="bar-field grow">
+              <span>数据库</span>
+              <select id="audit-db" class="select"><option value="">选择库</option></select>
+            </label>
+            <button class="button primary" id="audit-run"><span data-icon="shield"></span>开始检测</button>
+          </div>
+          <section class="console-card">
+            <div class="editor-area small" id="audit-editor"></div>
+            <div id="audit-summary" class="audit-summary" hidden></div>
+            <div class="table-wrap grow"><table class="data-table" id="audit-table"></table></div>
+            <div id="submit-panel" class="submit-panel" hidden>
+              <div class="submit-panel-title">
+                <span data-icon="flow"></span><span>检测通过，可直接提交上线工单</span>
+              </div>
+              <div class="submit-panel-form">
+                <label class="bar-field grow">
+                  <span>工单名称</span>
+                  <input id="wf-name" type="text" placeholder="例如：订单表新增字段" />
+                </label>
+                <label class="bar-field">
+                  <span>资源组</span>
+                  <select id="wf-group" class="select"></select>
+                </label>
+                <label class="bar-field" style="flex:none">
+                  <span>备份</span>
+                  <select id="wf-backup" class="select">
+                    <option value="true">备份</option>
+                    <option value="false">不备份</option>
+                  </select>
+                </label>
+                <button class="button primary" id="wf-submit-btn"><span data-icon="arrow"></span>提交工单</button>
+              </div>
+              <p class="submit-panel-note">提交后进入审核流；也可到 Archery 网页端查看与跟踪。</p>
+            </div>
+          </section>
+        </section>
+
+        <!-- ============ 表结构对比 ============ -->
+        <section class="view" id="view-diff">
+          <div class="list-head">
+            <div>
+              <h1>表结构对比</h1>
+              <p class="list-sub">两个环境（如 UAT vs PRO）的库表差异：多表 / 少表 / 结构不同，可查看建表语句差异。</p>
+            </div>
+          </div>
+          <div class="query-bar">
+            <label class="bar-field">
+              <span>实例 A</span>
+              <select id="diff-instance-a" class="select"></select>
+            </label>
+            <label class="bar-field">
+              <span>库 A</span>
+              <select id="diff-db-a" class="select"><option value="">选择库</option></select>
+            </label>
+            <label class="bar-field grow">
+              <span>表 A</span>
+              <select id="diff-table-a" class="select"><option value="">选库后可选表</option></select>
+            </label>
+            <label class="bar-field">
+              <span>实例 B</span>
+              <select id="diff-instance-b" class="select"></select>
+            </label>
+            <label class="bar-field">
+              <span>库 B</span>
+              <select id="diff-db-b" class="select"><option value="">选择库</option></select>
+            </label>
+            <label class="bar-field grow">
+              <span>表 B（默认同名）</span>
+              <select id="diff-table-b" class="select"><option value="">选库后可选表</option></select>
+            </label>
+            <button class="button primary" id="diff-table-run"><span data-icon="table"></span>对比此表</button>
+          </div>
+          <div class="query-bar">
+            <span class="editor-hint" style="padding-bottom:6px">整库：</span>
+            <button class="button" id="diff-run"><span data-icon="list"></span>对比表清单（快，不扫结构）</button>
+            <button class="button" id="diff-deep"><span data-icon="shield"></span>深度对比全部同名表（逐表请求，慢）</button>
+            <span class="editor-hint" style="padding-bottom:6px">清单只差 2 个请求；结构差异优先用上方单表对比</span>
+          </div>
+          <div id="diff-progress" class="diff-progress" hidden>
+            <span class="spinner"></span><span id="diff-progress-text">对比中…</span>
+          </div>
+          <div id="diff-summary" class="audit-summary" hidden></div>
+          <div id="diff-field-wrap" class="table-wrap" style="max-height:42%" hidden><table class="data-table" id="diff-field-table"></table></div>
+          <div class="table-wrap"><table class="data-table" id="diff-table"></table></div>
+        </section>
+
+        <!-- ============ 容量与事务诊断 ============ -->
+        <section class="view" id="view-diag">
+          <div class="list-head">
+            <div>
+              <h1>容量与事务诊断</h1>
+              <p class="list-sub">表空间 TOP 排行（找大表）与 InnoDB 当前事务（抓长事务）。</p>
+            </div>
+          </div>
+          <div class="query-bar">
+            <label class="bar-field grow">
+              <span>实例</span>
+              <select id="diag-instance" class="select"></select>
+            </label>
+            <button class="button primary" id="diag-run"><span data-icon="grid"></span>查询</button>
+            <button class="button" id="diag-refresh-trx"><span data-icon="refresh"></span>仅刷新事务</button>
+          </div>
+          <div id="diag-summary" class="audit-summary" hidden></div>
+          <div class="table-wrap"><table class="data-table" id="space-table"></table></div>
+          <div class="list-head" style="margin-top:4px">
+            <div><h1 style="font-size:14px">InnoDB 事务</h1></div>
+          </div>
+          <div class="table-wrap" style="max-height:280px"><table class="data-table" id="trx-table"></table></div>
+        </section>
+
+        <!-- ============ 上线工单 ============ -->
+        <section class="view" id="view-workflow">
+          <div class="list-head">
+            <div>
+              <h1>上线工单</h1>
+              <p class="list-sub">SQL 上线工单列表与执行明细，可下载回滚语句。</p>
+            </div>
+            <div class="search-field wide">
+              <span data-icon="search"></span>
+              <input id="wf-search" placeholder="搜索工单…" />
+            </div>
+            <button class="icon-button" id="wf-refresh" title="刷新"><span data-icon="refresh"></span></button>
+          </div>
+          <div class="table-wrap"><table class="data-table" id="wf-table"></table></div>
+          <div class="list-footer"><span id="wf-summary"></span>
+            <div class="pager" id="wf-pager"></div>
+          </div>
+          <div id="wf-detail" class="wf-detail" hidden></div>
+        </section>
+
+        <footer class="workspace-footer">
+          <span><i class="status-dot"></i>Archery 助手 <b id="footer-target"></b></span>
+          <span id="footer-target"></span>
+        </footer>
+      </main>
+    </div>
+
+    <!-- 命令面板（Ctrl+K） -->
+    <div id="palette" class="palette" hidden>
+      <div class="palette-panel">
+        <div class="palette-input-row">
+          <span data-icon="search"></span>
+          <input id="palette-input" placeholder="搜索：功能 / 实例 / 库 / 表 / 历史 SQL…" autocomplete="off" spellcheck="false" />
+          <kbd>Esc</kbd>
+        </div>
+        <div id="palette-list" class="palette-list" role="listbox"></div>
+        <div class="palette-foot">
+          <span><kbd>↑</kbd><kbd>↓</kbd> 选择</span><span><kbd>Enter</kbd> 执行</span><span><kbd>Esc</kbd> 关闭</span>
+        </div>
+      </div>
+    </div>
+
+    <dialog id="modal">
+      <div class="modal-header">
+        <h2 id="modal-title"></h2>
+        <button class="icon-button" id="modal-close" aria-label="关闭弹窗"><span data-icon="close"></span></button>
+      </div>
+      <div id="modal-body" class="modal-body"></div>
+    </dialog>
+    <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+    <input type="file" id="sql-file" accept=".sql,.txt" hidden />
+
+    <script type="module" src="js/combo.js"></script>
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>

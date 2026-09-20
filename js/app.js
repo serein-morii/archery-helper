@@ -1,0 +1,3948 @@
+import { loadConfig, saveConfig, normalizeBase, ArcheryApi, ArcheryApiError } from './api.js';
+import { mountIcons, icon, el } from './icons.js';
+import { SqlEditor } from './editor.js';
+
+mountIcons();
+
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+
+/* ======================= 全局状态 ======================= */
+const state = {
+  api: null,
+  cfg: null,
+  instances: [], // [{id, instance_name, db_type, type}]
+  current: { instance: '', db: '', schema: '' },
+  dbs: [], // 当前实例库列表
+  results: [], // 结果 tab 集合
+  activeResult: null,
+  lastQueryLogId: null, // 最近一次执行对应的 query_log_id（收藏用）
+  resultSeq: 0,
+  // 各列表页
+  history: { page: 1, search: '', total: 0 },
+  favorites: { page: 1, search: '', total: 0 },
+  workflow: { page: 1, search: '', total: 0 },
+  theme: localStorage.getItem('archery-theme') || 'dark',
+};
+
+/* ======================= 工具 ======================= */
+/** 程序内设置下拉值：combo 显示层依赖 change 事件刷新，直接赋值不生效 */
+function setSelectValue(sel, value) {
+  const el = typeof sel === 'string' ? $(sel) : sel;
+  if (!el || el.value === value) return;
+  if (!el.querySelector(`option[value="${CSS.escape(String(value))}"]`)) return;
+  el.value = value;
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/** 轻量 Markdown 渲染（标题/列表/加粗/行内代码），用于更新日志展示 */
+function renderMarkdown(text) {
+  const inline = (s) =>
+    escapeHtml(s)
+      .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+      .replace(/`(.+?)`/g, '<code>$1</code>');
+  const out = [];
+  let inList = false;
+  const closeList = () => {
+    if (inList) {
+      out.push('</ul>');
+      inList = false;
+    }
+  };
+  for (const line of String(text).split('\n')) {
+    if (/^### /.test(line)) {
+      closeList();
+      out.push(`<h4>${inline(line.slice(4))}</h4>`);
+    } else if (/^## /.test(line)) {
+      closeList();
+      out.push(`<h3>${inline(line.slice(3))}</h3>`);
+    } else if (/^# /.test(line)) {
+      closeList();
+      out.push(`<h2>${inline(line.slice(2))}</h2>`);
+    } else if (/^- /.test(line)) {
+      if (!inList) {
+        out.push('<ul>');
+        inList = true;
+      }
+      out.push(`<li>${inline(line.slice(2))}</li>`);
+    } else if (line.trim() === '') {
+      closeList();
+    } else {
+      closeList();
+      out.push(`<p>${inline(line)}</p>`);
+    }
+  }
+  closeList();
+  return out.join('');
+}
+
+function toast(text, type = 'info') {
+  const t = el(`<div class="toast ${type === 'error' ? 'error' : type === 'success' ? 'success' : ''}">
+    <span data-icon="${type === 'error' ? 'alert' : type === 'success' ? 'check' : 'info'}"></span>
+    <span>${escapeHtml(text)}</span></div>`);
+  $('#toast-region').appendChild(t);
+  setTimeout(() => t.remove(), 3200);
+}
+
+function openModal(title, bodyNode, opts = {}) {
+  $('#modal-title').textContent = title;
+  const body = $('#modal-body');
+  body.replaceChildren(bodyNode);
+  mountIcons(body);
+  $('#modal').classList.toggle('wide', !!opts.wide);
+  $('#modal').showModal();
+}
+function closeModal() {
+  $('#modal')?.close();
+}
+$('#modal-close').addEventListener('click', closeModal);
+
+function download(filename, content, mime = 'text/plain') {
+  const a = document.createElement('a');
+  const url = URL.createObjectURL(new Blob([content], { type: mime + ';charset=utf-8' }));
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+function timestamp() {
+  return new Date().toLocaleTimeString('zh-CN', { hour12: false });
+}
+
+/* ======================= 主题 ======================= */
+function applyTheme() {
+  document.documentElement.dataset.theme = state.theme;
+  $('#theme-toggle').innerHTML = icon(state.theme === 'dark' ? 'sun' : 'moon');
+}
+$('#theme-toggle').addEventListener('click', () => {
+  state.theme = state.theme === 'dark' ? 'light' : 'dark';
+  localStorage.setItem('archery-theme', state.theme);
+  applyTheme();
+});
+
+/* ======================= 视图切换 ======================= */
+$$('.rail-button[data-nav]').forEach((btn) => {
+  btn.addEventListener('click', () => switchView(btn.dataset.nav));
+});
+function switchView(name) {
+  $$('.rail-button[data-nav]').forEach((b) => b.classList.toggle('active', b.dataset.nav === name));
+  $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${name}`));
+  if (name === 'history') loadHistory();
+  if (name === 'favorites') loadFavorites();
+  if (name === 'workflow') loadWorkflows();
+}
+
+/* ======================= 连接 ======================= */
+function setConnection(ok, text) {
+  const c = $('#connection');
+  c.classList.toggle('ok', ok);
+  c.innerHTML = `<i></i>${escapeHtml(text)}`;
+}
+
+/** 连接失败时展示原因 + 页面内登录表单 */
+function showAuthBanner(reason) {
+  $('#auth-banner-text').textContent = reason;
+  $('#banner-user').value = state.cfg?.username || '';
+  $('#banner-pass').value = state.cfg?.password || '';
+  $('#banner-totp').value = state.cfg?.totpSecret || '';
+  $('#auth-banner').hidden = false;
+}
+
+async function init() {
+  applyTheme();
+  state.cfg = await loadConfig();
+  state.api = new ArcheryApi(state.cfg);
+  $('#server-label').textContent = state.cfg.baseUrl.replace(/^https?:\/\//, '');
+  $('#user-name').textContent = state.cfg.username || '浏览器会话';
+  $('#avatar').innerHTML = icon('user');
+  let hasSession = false;
+  try {
+    hasSession = await state.api.hasSession();
+  } catch (e) {
+    // 地址未配置等环境问题：直接引导，不中断页面
+    setConnection(false, '未配置');
+    showAuthBanner(`${e.message}。`);
+    return;
+  }
+  if (hasSession) {
+    // 已有浏览器会话：直接连接，不打扰
+    await connect();
+    return;
+  }
+  // 无会话：有保存过的凭证就自动登录，失败再弹出登录表单
+  if (state.cfg.username && state.cfg.password) {
+    setConnection(false, '登录中…');
+    try {
+      await state.api.login();
+      await connect();
+      return;
+    } catch (e) {
+      if (!e.sessionKey) {
+        showAuthBanner(`自动登录失败：${e.message}。请核对下方账号信息后重新登录。`);
+        return;
+      }
+      // 2FA：交给横幅流程继续
+      showAuthBanner(e.message);
+      pendingTwoFa = { sessionKey: e.sessionKey };
+      $('#banner-otp').hidden = false;
+      $('#banner-login').textContent = '验证';
+      return;
+    }
+  }
+  setConnection(false, '未登录');
+  showAuthBanner('未检测到 Archery 登录会话：请在浏览器登录 Archery 后点「重新检测」，或直接在下方输入账号密码登录。');
+}
+
+async function connect() {
+  setConnection(false, '连接中…');
+  try {
+    const res = await state.api.userInstances();
+    if (res.status !== 0) throw new ArcheryApiError(res.msg || '无法获取实例列表');
+    state.instances = res.data || [];
+    setConnection(true, `已连接 · ${state.instances.length} 个实例`);
+    $('#auth-banner').hidden = true;
+    buildInstanceSelectors();
+    buildTree();
+    restoreDraft();
+    // 无凭证（纯浏览器会话）时，用自己最近一条查询日志取显示名
+    if (!state.cfg.username) {
+      state.api
+        .queryLog({ limit: 1, offset: 0 })
+        .then((r) => {
+          const name = r.rows?.[0]?.user_display;
+          if (name) {
+            $('#user-name').textContent = name;
+          }
+        })
+        .catch(() => {});
+    }
+  } catch (e) {
+    setConnection(false, '连接失败');
+    showAuthBanner(
+      e.needLogin
+        ? `${e.message} 可直接在下方输入账号密码登录。`
+        : `连接失败：${e.message || '未知错误'}。若刚在浏览器登录过，可点「重新检测」。`
+    );
+    if (e.needLogin) toast(e.message, 'error');
+  }
+}
+$('#retry-connect').addEventListener('click', connect);
+
+/* 横幅内登录：账号密码 →（若需 2FA）动态验证码 → 重连 */
+let pendingTwoFa = null; // {sessionKey}
+$('#banner-login').addEventListener('click', async () => {
+  const btn = $('#banner-login');
+  const username = $('#banner-user').value.trim();
+  const password = $('#banner-pass').value;
+  const otpInput = $('#banner-otp');
+  btn.disabled = true;
+  try {
+    // 第二阶段：已拿到待验证会话，提交动态码
+    if (pendingTwoFa) {
+      const otp = otpInput.value.trim();
+      if (!/^\d{6}$/.test(otp)) {
+        toast('请输入 6 位动态验证码', 'error');
+        return;
+      }
+      btn.textContent = '验证中…';
+      await state.api.verifyTwoFa(pendingTwoFa.sessionKey, otp);
+      pendingTwoFa = null;
+      otpInput.hidden = true;
+      otpInput.value = '';
+      toast('两步验证通过', 'success');
+      await connect();
+      return;
+    }
+    // 第一阶段：账号密码登录
+    if (!username || !password) {
+      toast('请输入用户名和密码', 'error');
+      return;
+    }
+    btn.textContent = '登录中…';
+    state.cfg = await saveConfig({
+      username,
+      password,
+      totpSecret: $('#banner-totp').value.trim(),
+    });
+    state.api = new ArcheryApi(state.cfg);
+    await state.api.login();
+    $('#user-name').textContent = username;
+    $('#avatar').innerHTML = icon('user');
+    toast('登录成功', 'success');
+    await connect();
+  } catch (e) {
+    if (e.sessionKey) {
+      // 服务器要求 2FA：切换到验证码输入
+      pendingTwoFa = { sessionKey: e.sessionKey };
+      otpInput.hidden = false;
+      otpInput.focus();
+      $('#auth-banner-text').textContent = `${e.message}`;
+      toast('需要两步验证，请输入当前动态码', 'info');
+    } else {
+      toast(`登录失败：${e.message}`, 'error');
+      $('#auth-banner-text').textContent = `登录失败：${e.message}`;
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = pendingTwoFa ? '验证' : '登录';
+  }
+});
+$('#banner-pass').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#banner-login').click();
+});
+$('#banner-otp').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#banner-login').click();
+});
+
+/* ======================= 实例/库 联动 ======================= */
+const DB_TYPE_LABEL = { mysql: 'MySQL', tidb: 'TiDB', mssql: 'MsSQL', redis: 'Redis', pgsql: 'PgSQL', oracle: 'Oracle', mongo: 'Mongo', phoenix: 'Phoenix', odps: 'ODPS', clickhouse: 'ClickHouse', starrocks: 'StarRocks', adb: 'ADB' };
+
+function buildInstanceSelectors() {
+  const groups = new Map();
+  for (const ins of state.instances) {
+    const label = DB_TYPE_LABEL[ins.db_type] || ins.db_type;
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(ins);
+  }
+  const opts = ['<option value="">选择实例</option>'];
+  for (const [label, list] of groups) {
+    opts.push(`<optgroup label="${escapeHtml(label)}">`);
+    for (const ins of list) {
+      opts.push(`<option value="${escapeHtml(ins.instance_name)}" data-id="${ins.id}">${escapeHtml(ins.instance_name)}</option>`);
+    }
+    opts.push('</optgroup>');
+  }
+  $('#instance-name').innerHTML = opts.join('');
+  $('#audit-instance').innerHTML = opts.join('');
+  $('#diff-instance-a').innerHTML = opts.join('');
+  $('#diff-instance-b').innerHTML = opts.join('');
+  $('#diag-instance').innerHTML = opts.join('');
+}
+
+async function onInstanceChange(instanceName, { fromTree = false } = {}) {
+  state.current.instance = instanceName;
+  state.current.db = '';
+  state.current.schema = '';
+  const dbSel = $('#db-name');
+  dbSel.innerHTML = '<option value="">选择库</option>';
+  dbSel.disabled = true;
+  $('#schema-field').hidden = true;
+  $('#schema-name').innerHTML = '<option value="">选择 schema</option>';
+  state.dbs = [];
+  saveDraft();
+  if (!instanceName) return;
+  try {
+    const res = await state.api.databases(instanceName);
+    if (res.status !== 0) throw new Error(res.msg);
+    state.dbs = res.data || [];
+    dbSel.innerHTML =
+      '<option value="">选择库</option>' +
+      state.dbs.map((d) => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('');
+    dbSel.disabled = false;
+    // PgSQL 需要 schema
+    const ins = state.instances.find((i) => i.instance_name === instanceName);
+    if (ins?.db_type === 'pgsql') $('#schema-field').hidden = false;
+  } catch (e) {
+    toast(`获取数据库列表失败：${e.message}`, 'error');
+  }
+  if (!fromTree) highlightTreeNode(['i', instanceName]);
+}
+
+$('#instance-name').addEventListener('change', (e) => onInstanceChange(e.target.value));
+$('#db-name').addEventListener('change', (e) => {
+  state.current.db = e.target.value;
+  state.current.schema = '';
+  saveDraft();
+  preloadTables();
+  if (state.current.instance && e.target.value) {
+    const ins = state.instances.find((i) => i.instance_name === state.current.instance);
+    if (ins?.db_type === 'pgsql') loadSchemas();
+  }
+  highlightTreeNode(['i', state.current.instance, 'd', e.target.value]);
+});
+
+async function loadSchemas() {
+  try {
+    const res = await state.api.schemas(state.current.instance, state.current.db);
+    if (res.status !== 0) throw new Error(res.msg);
+    $('#schema-name').innerHTML =
+      '<option value="">选择 schema</option>' +
+      (res.data || []).map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+  } catch (e) {
+    toast(`获取 schema 失败：${e.message}`, 'error');
+  }
+}
+$('#schema-name').addEventListener('change', (e) => {
+  state.current.schema = e.target.value;
+  saveDraft();
+});
+
+/* ======================= 对象树 ======================= */
+const tree = {
+  root: null, // [{group}] 结构按需加载
+};
+
+async function buildTree() {
+  const container = $('#object-tree');
+  container.replaceChildren(el(`<div class="tree-empty">加载中…</div>`));
+  const groups = new Map();
+  for (const ins of state.instances) {
+    const label = DB_TYPE_LABEL[ins.db_type] || ins.db_type;
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(ins);
+  }
+  tree.root = [...groups.entries()].map(([label, list]) => ({
+    kind: 'group',
+    name: label,
+    children: list.map((i) => ({ kind: 'instance', name: i.instance_name, dbType: i.db_type, id: i.id })),
+  }));
+  renderTree();
+  $('#tree-total').textContent = `${state.instances.length} 实例`;
+}
+
+function renderTree() {
+  const filter = $('#tree-search').value.trim().toLowerCase();
+  const container = $('#object-tree');
+  const frag = document.createDocumentFragment();
+  for (const group of tree.root) {
+    const gNode = el(`<div class="tree-node open" data-kind="group" data-name="${escapeHtml(group.name)}"></div>`);
+    const gRow = el(`<div class="tree-row expanded">
+      <span class="caret" data-icon="right"></span>
+      <span class="icon" data-icon="folder"></span>
+      <span class="label">${escapeHtml(group.name)}</span>
+      <span class="count">${group.children.length}</span>
+    </div>`);
+    gRow.addEventListener('click', () => {
+      gNode.classList.toggle('open');
+      gRow.classList.toggle('expanded');
+    });
+    gNode.appendChild(gRow);
+    const children = document.createElement('div');
+    children.className = 'tree-children';
+    for (const ins of group.children) {
+      if (filter && !nodeMatches(ins, filter)) continue;
+      children.appendChild(instanceNode(ins));
+    }
+    gNode.appendChild(children);
+    frag.appendChild(gNode);
+  }
+  container.replaceChildren(frag);
+  if (!$('#object-tree').children.length) {
+    container.replaceChildren(el(`<div class="tree-empty">没有匹配的对象</div>`));
+  }
+  mountIcons(container);
+}
+
+function nodeMatches(node, filter) {
+  if (node.name.toLowerCase().includes(filter)) return true;
+  return (node.children || []).some((c) => nodeMatches(c, filter));
+}
+
+function instanceNode(ins) {
+  const node = el(`<div class="tree-node" data-kind="instance" data-name="${escapeHtml(ins.name)}"></div>`);
+  const row = el(`<div class="tree-row">
+    <span class="caret" data-icon="right"></span>
+    <span class="icon" data-icon="database"></span>
+    <span class="label">${escapeHtml(ins.name)}</span>
+  </div>`);
+  const children = document.createElement('div');
+  children.className = 'tree-children';
+  let loaded = false;
+  row.addEventListener('click', async () => {
+    node.classList.toggle('open');
+    row.classList.toggle('expanded');
+    // 联动查询栏
+    if ($('#instance-name').value !== ins.name) {
+      $('#instance-name').value = ins.name;
+      await onInstanceChange(ins.name, { fromTree: true });
+    }
+    if (node.classList.contains('open') && !loaded) {
+      loaded = true;
+      children.replaceChildren(el(`<div class="tree-empty">加载中…</div>`));
+      try {
+        const res = await state.api.databases(ins.name);
+        if (res.status !== 0) throw new Error(res.msg);
+        children.replaceChildren();
+        for (const db of res.data || []) {
+          children.appendChild(dbNode(ins, db));
+        }
+        if (!children.children.length) children.replaceChildren(el(`<div class="tree-empty">无数据库</div>`));
+      } catch (e) {
+        loaded = false;
+        children.replaceChildren(el(`<div class="tree-empty">${escapeHtml(e.message)}</div>`));
+      }
+    }
+  });
+  node.append(row, children);
+  return node;
+}
+
+function dbNode(ins, dbName) {
+  const node = el(`<div class="tree-node" data-kind="db" data-name="${escapeHtml(dbName)}"></div>`);
+  const row = el(`<div class="tree-row">
+    <span class="caret" data-icon="right"></span>
+    <span class="icon" data-icon="folder"></span>
+    <span class="label">${escapeHtml(dbName)}</span>
+  </div>`);
+  row.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    showContextMenu(e.clientX, e.clientY, [
+      {
+        label: '导出数据字典（Markdown）',
+        icon: 'download',
+        action: () => exportDataDict(typeof ins === 'string' ? ins : ins.name || ins.instance_name, dbName),
+      },
+      {
+        label: '复制库名',
+        icon: 'copy',
+        action: () => {
+          navigator.clipboard.writeText(dbName);
+          toast('已复制', 'success');
+        },
+      },
+    ]);
+  });
+  const children = document.createElement('div');
+  children.className = 'tree-children';
+  let loaded = false;
+  row.addEventListener('click', async (e) => {
+    node.classList.toggle('open');
+    row.classList.toggle('expanded');
+    // 联动查询栏
+    if ($('#instance-name').value !== ins.name) {
+      setSelectValue('#instance-name', ins.name);
+      await onInstanceChange(ins.name, { fromTree: true });
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    if ($('#db-name').querySelector(`option[value="${CSS.escape(dbName)}"]`) && $('#db-name').value !== dbName) {
+      setSelectValue('#db-name', dbName);
+      state.current.db = dbName;
+      saveDraft();
+    }
+    if (node.classList.contains('open') && !loaded) {
+      loaded = true;
+      children.replaceChildren(el(`<div class="tree-empty">加载中…</div>`));
+      try {
+        const res = await state.api.tables(ins.name, dbName);
+        if (res.status !== 0) throw new Error(res.msg);
+        children.replaceChildren();
+        const tables = res.data || [];
+        for (const tb of tables) {
+          children.appendChild(tableNode(ins, dbName, tb));
+        }
+        if (!tables.length) children.replaceChildren(el(`<div class="tree-empty">无表</div>`));
+      } catch (e) {
+        loaded = false;
+        children.replaceChildren(el(`<div class="tree-empty">${escapeHtml(e.message)}</div>`));
+      }
+    }
+  });
+  node.append(row, children);
+  return node;
+}
+
+/* ---------- 右键菜单 ---------- */
+let ctxMenuEl = null;
+function closeContextMenu() {
+  ctxMenuEl?.remove();
+  ctxMenuEl = null;
+}
+document.addEventListener('click', closeContextMenu);
+window.addEventListener('blur', closeContextMenu);
+document.addEventListener('contextmenu', (e) => {
+  if (!e.target.closest('.tree-row')) closeContextMenu();
+});
+function showContextMenu(x, y, items) {
+  closeContextMenu();
+  const menu = el(`<div class="ctx-menu"></div>`);
+  for (const it of items) {
+    if (it === '-') {
+      menu.appendChild(el(`<div class="ctx-sep"></div>`));
+      continue;
+    }
+    const btn = el(`<button>${icon(it.icon || 'chevron')}<span>${escapeHtml(it.label)}</span></button>`);
+    btn.addEventListener('click', () => {
+      closeContextMenu();
+      it.action();
+    });
+    menu.appendChild(btn);
+  }
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.min(x, innerWidth - rect.width - 8) + 'px';
+  menu.style.top = Math.min(y, innerHeight - rect.height - 8) + 'px';
+  ctxMenuEl = menu;
+}
+
+function tableNode(ins, dbName, tableName) {
+  const node = el(`<div class="tree-node" data-kind="table" data-name="${escapeHtml(tableName)}"></div>`);
+  const row = el(`<div class="tree-row" title="${escapeHtml(tableName)}">
+    <span class="icon" data-icon="table"></span>
+    <span class="label">${escapeHtml(tableName)}</span>
+  </div>`);
+  row.addEventListener('click', () => describeTable(ins, dbName, tableName));
+  row.addEventListener('dblclick', () => {
+    editor.insertText(tableName);
+    toast(`已插入表名 ${tableName}`, 'success');
+  });
+  row.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const insName = typeof ins === 'string' ? ins : ins.name || ins.instance_name;
+    showContextMenu(e.clientX, e.clientY, [
+      {
+        label: '查看表结构',
+        icon: 'eye',
+        action: () => describeTable(ins, dbName, tableName),
+      },
+      {
+        label: 'SELECT *',
+        icon: 'table',
+        action: () => editor.insertText(`select * from \`${tableName}\` limit 100;
+`),
+      },
+      {
+        label: 'SELECT 全部字段',
+        icon: 'grid',
+        action: async () => {
+          const cols = await getTableColumns(insName, dbName, tableName);
+          if (!cols.length) return toast('未能获取字段列表', 'error');
+          const colList = cols.map((c) => '  `' + c + '`').join(',\n');
+          editor.insertText(`select\n${colList}\nfrom \`${tableName}\` limit 100;\n`);
+        },
+      },
+      {
+        label: 'SELECT COUNT',
+        icon: 'list',
+        action: () => editor.insertText(`select count(*) as cnt from \`${tableName}\`;
+`),
+      },
+      '-',
+      { label: '复制表名', icon: 'copy', action: () => { navigator.clipboard.writeText(tableName); toast('已复制', 'success'); } },
+      { label: '复制库名.表名', icon: 'copy', action: () => { navigator.clipboard.writeText(`${dbName}.${tableName}`); toast('已复制', 'success'); } },
+    ]);
+  });
+  node.appendChild(row);
+  return node;
+}
+
+/* 表字段缓存：describe 解析 CREATE TABLE 提取列名 */
+const columnCache = new Map(); // key: instance/db/table -> string[]
+async function getTableColumns(instanceName, dbName, tableName) {
+  const key = `${instanceName}/${dbName}/${tableName}`;
+  if (columnCache.has(key)) return columnCache.get(key);
+  try {
+    const res = await state.api.describe(instanceName, dbName, tableName);
+    if (res.status !== 0) throw new Error(res.msg);
+    const createSql = res.data?.rows?.[0]?.[1] || '';
+    const cols = [...createSql.matchAll(/^\s*`(\w+)`/gm)].map((m) => m[1]);
+    columnCache.set(key, cols);
+    return cols;
+  } catch (e) {
+    toast(`获取 ${tableName} 字段失败：${e.message}`, 'error');
+    return [];
+  }
+}
+
+function highlightTreeNode(path) {
+  $$('#object-tree .tree-row.current').forEach((r) => r.classList.remove('current'));
+}
+
+$('#tree-search').addEventListener('input', renderTree);
+$('#refresh-tree').addEventListener('click', async () => {
+  await connect();
+  toast('数据浏览器已刷新', 'success');
+});
+
+/* 侧边栏折叠与拖宽 */
+const syncSidebarToggle = () => {
+  $('#sidebar-toggle small').textContent = document.body.classList.contains('sidebar-collapsed') ? '展开' : '收起';
+};
+$('#sidebar-toggle').addEventListener('click', () => {
+  document.body.classList.toggle('sidebar-collapsed');
+  syncSidebarToggle();
+});
+(function () {
+  const resizer = $('#sidebar-resizer');
+  let dragging = false;
+  resizer.addEventListener('mousedown', () => {
+    dragging = true;
+    document.body.style.cursor = 'col-resize';
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const w = Math.min(Math.max(e.clientX - 64, 180), 480);
+    document.documentElement.style.setProperty('--sidebar-w', `${w}px`);
+  });
+  document.addEventListener('mouseup', () => {
+    dragging = false;
+    document.body.style.cursor = '';
+  });
+})();
+
+/* ======================= 编辑器 ======================= */
+const editor = new SqlEditor($('#editor'), {
+  onChange: updateEditorHint,
+  onRun: runQuery,
+  onAltRun: () => formatSql(),
+  onSuggest: suggestItems,
+});
+
+/* 当前库的表名缓存（补全用） */
+let currentTables = [];
+async function preloadTables() {
+  const { instance, db } = state.current;
+  currentTables = [];
+  if (!instance || !db) return;
+  try {
+    const res = await state.api.tables(instance, db, state.current.schema);
+    if (res.status === 0) currentTables = res.data || [];
+  } catch {
+    /* 静默失败，右键/树仍可用 */
+  }
+}
+async function suggestItems({ table, prefix }) {
+  if (table) {
+    table = table.replace(/`/g, '');
+    let cols = [];
+    try {
+      cols = await getTableColumns(state.current.instance, state.current.db, table);
+    } catch { /* 走兜底 */ }
+    if (!cols.length) {
+      // 兜底：直接查 information_schema（describe 解析失败/表名含特殊字符时）
+      try {
+        const esc = table.replace(/'/g, "''");
+        const res = await state.api.query({
+          instanceName: state.current.instance,
+          dbName: state.current.db,
+          sqlContent: `select column_name from information_schema.columns where table_schema='${state.current.db.replace(/'/g, "''")}' and table_name='${esc}' order by ordinal_position`,
+          limitNum: 300,
+        });
+        if (res.status === 0) {
+          cols = (res.data.rows || []).map((r) => r[0]);
+          columnCache.set(`${state.current.instance}/${state.current.db}/${table}`, cols);
+        }
+      } catch { /* 静默 */ }
+    }
+    return cols.map((c) => ({ label: c, kind: 'column' }));
+  }
+  if (!currentTables.length) await preloadTables();
+  return currentTables.map((t) => ({ label: t, kind: 'table' }));
+}
+const auditEditor = new SqlEditor($('#audit-editor'), {});
+
+function updateEditorHint() {
+  const sel = editor.getSelection();
+  const pos = editor.ta.value.slice(0, editor.ta.selectionStart).split('\n');
+  $('#editor-selection').textContent = sel ? `已选中 ${sel.length} 字符，运行时仅执行选中部分` : '选中 SQL 可单独运行';
+  $('#query-timing').textContent = `第 ${pos.length} 行，第 ${pos[pos.length - 1].length + 1} 列`;
+}
+
+/* ======================= 多 SQL 标签页 ======================= */
+const queryTabs = { list: [], activeId: null, seq: 0 };
+
+function renderQueryTabs() {
+  const bar = $('#query-tabs');
+  bar.replaceChildren();
+  for (const t of queryTabs.list) {
+    const label = t.title || `查询 ${t.id}`;
+    const tab = el(`<div class="result-tab ${t.id === queryTabs.activeId ? 'active' : ''}" data-id="${t.id}">
+      <span>${escapeHtml(label)}</span>
+      <span class="close-x">${icon('close')}</span>
+    </div>`);
+    tab.addEventListener('click', (e) => {
+      if (e.target.closest('.close-x')) {
+        closeQueryTab(t.id);
+        return;
+      }
+      switchQueryTab(t.id);
+    });
+    bar.appendChild(tab);
+  }
+  const addBtn = el(`<div class="result-tab" title="新建查询"><span>${icon('plus')}</span></div>`);
+  addBtn.addEventListener('click', () => newQueryTab());
+  bar.appendChild(addBtn);
+}
+
+function newQueryTab(sql = '') {
+  // 当前内容先存回活动 tab
+  if (queryTabs.activeId) {
+    const cur = queryTabs.list.find((t) => t.id === queryTabs.activeId);
+    if (cur) cur.sql = editor.value;
+  }
+  queryTabs.seq += 1;
+  const tab = { id: queryTabs.seq, title: '', sql };
+  queryTabs.list.push(tab);
+  queryTabs.activeId = tab.id;
+  editor.setValue(sql);
+  renderQueryTabs();
+  saveDraft();
+  editor.ta.focus();
+}
+
+function switchQueryTab(id) {
+  if (id === queryTabs.activeId) return;
+  const cur = queryTabs.list.find((t) => t.id === queryTabs.activeId);
+  if (cur) cur.sql = editor.value;
+  const next = queryTabs.list.find((t) => t.id === id);
+  if (!next) return;
+  queryTabs.activeId = id;
+  editor.setValue(next.sql);
+  renderQueryTabs();
+  saveDraft();
+}
+
+function closeQueryTab(id) {
+  const idx = queryTabs.list.findIndex((t) => t.id === id);
+  if (idx < 0) return;
+  queryTabs.list.splice(idx, 1);
+  if (queryTabs.activeId === id) {
+    const next = queryTabs.list[idx] || queryTabs.list[idx - 1];
+    if (next) {
+      queryTabs.activeId = next.id;
+      editor.setValue(next.sql);
+    } else {
+      newQueryTab();
+      return;
+    }
+  }
+  renderQueryTabs();
+  saveDraft();
+}
+
+/** 以第一条语句的关键词为标签命名（仅首次） */
+function refreshActiveTabTitle() {
+  const t = queryTabs.list.find((x) => x.id === queryTabs.activeId);
+  if (!t) return;
+  const m = editor.value.trim().match(/^(\w+)/);
+  const guess = m ? m[1].toUpperCase() + ' …' : '';
+  if (!t.title && guess) {
+    t.title = guess;
+    renderQueryTabs();
+  }
+}
+
+/* SQL 文件导入导出 */
+$('#import-sql').addEventListener('click', () => $('#sql-file').click());
+$('#sql-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  editor.setValue(await file.text(), true);
+  e.target.value = '';
+});
+$('#download-sql').addEventListener('click', () => {
+  if (!editor.value.trim()) return toast('编辑器内容为空');
+  download(`query-${Date.now()}.sql`, editor.value);
+});
+
+/* ======================= SQL 格式化（tokenizer 版） ======================= */
+function formatSqlText(sql) {
+  // ---------- 1) tokenize（word 含中文，避免中文别名被拆开） ----------
+  const tokens = [];
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const rest = sql.slice(i);
+    let m;
+    if ((m = rest.match(/^--[^\n]*/)) || (m = rest.match(/^#[^\n]*/)) || (m = rest.match(/^\/\*[\s\S]*?(\*\/|$)/))) {
+      tokens.push({ t: 'comment', v: m[0] });
+      i += m[0].length;
+    } else if ((m = rest.match(/^'(?:[^'\\]|\\.|'')*'?/)) || (m = rest.match(/^"(?:[^"\\]|\\.)*"?/))) {
+      tokens.push({ t: 'str', v: m[0] });
+      i += m[0].length;
+    } else if ((m = rest.match(/^`[^`]*`?/))) {
+      tokens.push({ t: 'ident', v: m[0] });
+      i += m[0].length;
+    } else if ((m = rest.match(/^[A-Za-z_\u4e00-\u9fff$][\w\u4e00-\u9fff$]*/))) {
+      tokens.push({ t: 'word', v: m[0] });
+      i += m[0].length;
+    } else if ((m = rest.match(/^\d+(\.\d+)?/))) {
+      tokens.push({ t: 'num', v: m[0] });
+      i += m[0].length;
+    } else if ((m = rest.match(/^\s+/))) {
+      i += m[0].length;
+    } else {
+      tokens.push({ t: 'op', v: rest[0] });
+      i += 1;
+    }
+  }
+
+  // ---------- 2) 组装 ----------
+  const JOIN_HEAD = new Set(['LEFT', 'RIGHT', 'INNER', 'OUTER', 'FULL', 'CROSS']);
+  const CLAUSE = new Set(['SELECT', 'FROM', 'WHERE', 'HAVING', 'LIMIT', 'OFFSET', 'VALUES', 'SET', 'ON', 'AND', 'OR', 'UNION', 'EXCEPT', 'INTERSECT', 'INSERT', 'UPDATE', 'DELETE', 'EXPLAIN']);
+  const TWO_WORD = { GROUP: 'BY', ORDER: 'BY', PARTITION: 'BY', UNION: 'ALL', INSERT: 'INTO' };
+  const kw = (tok) => (tok && tok.t === 'word' ? tok.v.toUpperCase() : '');
+
+  const out = [];
+  let depth = 0;
+  let caseDepth = 0;
+  let lineLen = 0;
+  let inSelectList = false;
+  let noGap = false;          // 上一个 token 是 . 或函数( → 紧跟不加空格
+  const parenStack = [];      // 'f'=函数括号 'q'=子查询括号
+
+  const newline = (extra = 0) => {
+    out.push('\n' + '  '.repeat(depth + caseDepth + extra));
+    lineLen = 0;
+    noGap = false;
+  };
+  const push = (v) => {
+    if (lineLen > 0 && !noGap) out.push(' ');
+    out.push(v);
+    lineLen += v.length;
+    noGap = false;
+  };
+  const pushRaw = (v) => {
+    out.push(v);
+    lineLen += v.length;
+  };
+
+  for (let k = 0; k < tokens.length; k++) {
+    const tok = tokens[k];
+    const w = kw(tok);
+    const prev = tokens[k - 1];
+    const next = tokens[k + 1];
+
+    if (tok.t === 'comment') {
+      newline();
+      pushRaw(tok.v);
+      newline();
+      continue;
+    }
+
+    // CASE 结构
+    if (w === 'CASE') {
+      push('CASE');
+      caseDepth += 1;
+      noGap = false;
+      continue;
+    }
+    if (w === 'END') {
+      caseDepth = Math.max(0, caseDepth - 1);
+      newline();
+      push('END');
+      continue;
+    }
+    if (w === 'WHEN' || w === 'ELSE') {
+      newline();
+      push(w);
+      continue;
+    }
+
+    // JOIN 组合
+    if (JOIN_HEAD.has(w) && kw(next) === 'JOIN') {
+      inSelectList = false;
+      newline();
+      push(w + ' JOIN');
+      k += 1;
+      continue;
+    }
+    if (JOIN_HEAD.has(w) && JOIN_HEAD.has(kw(next)) && kw(tokens[k + 2]) === 'JOIN') {
+      inSelectList = false;
+      newline();
+      push(w + ' ' + kw(next) + ' JOIN');
+      k += 2;
+      continue;
+    }
+
+    // 两词子句
+    if (TWO_WORD[w] && kw(next) === TWO_WORD[w]) {
+      if (w === 'UNION') {
+        out.push('\n\n');
+        lineLen = 0;
+        depth = 0;
+        caseDepth = 0;
+        parenStack.length = 0;
+      } else {
+        newline();
+      }
+      push(w + ' ' + TWO_WORD[w]);
+      inSelectList = false;
+      k += 1;
+      continue;
+    }
+
+    // 单词子句
+    if (CLAUSE.has(w)) {
+      if (w === 'AND' || w === 'OR') {
+        if (parenStack.length === 0) {
+          newline();
+          push(w);
+        } else {
+          push(w);
+        }
+      } else {
+        inSelectList = w === 'SELECT';
+        newline();
+        push(w);
+      }
+      continue;
+    }
+
+    // 标点
+    if (tok.v === '.') {
+      pushRaw('.');
+      noGap = true;
+      continue;
+    }
+    if (tok.v === '(') {
+      const isFunc =
+        prev &&
+        (prev.t === 'ident' ||
+          (prev.t === 'word' && !CLAUSE.has(kw(prev)) && !JOIN_HEAD.has(kw(prev)) && !TWO_WORD[kw(prev)] && !['CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'AND', 'OR', 'ON', 'IN', 'NOT', 'VALUES', 'USING', 'LIKE', 'BETWEEN', 'EXISTS', 'DISTINCT'].includes(kw(prev))));
+      // 配对区间内不含 SELECT → 分组括号（如 where 里的 ((a=1) or (b=2))），行内处理不换行
+      let lv = 0;
+      let j = k;
+      let hasSelect = false;
+      for (; j < tokens.length; j++) {
+        if (tokens[j].v === '(') lv += 1;
+        else if (tokens[j].v === ')') {
+          lv -= 1;
+          if (lv === 0) break;
+        } else if (kw(tokens[j]) === 'SELECT' || kw(tokens[j]) === 'UNION') hasSelect = true;
+      }
+      if (isFunc) {
+        pushRaw('('); // count( 之间不留空格
+        parenStack.push('f');
+      } else if (hasSelect) {
+        depth += 1;
+        push('('); // 子查询 ( 与前词同行，内容换行缩进
+        parenStack.push('q');
+        newline();
+      } else {
+        push('(');
+        parenStack.push('g');
+      }
+      noGap = true;
+      continue;
+    }
+    if (tok.v === ')') {
+      const kind = parenStack.pop();
+      if (kind === 'q') {
+        depth = Math.max(0, depth - 1);
+        newline();
+        pushRaw(')');
+      } else {
+        pushRaw(')'); // 函数/分组右括号：与前文紧贴，不加空格
+      }
+      noGap = false;
+      continue;
+    }
+    if (tok.v === ',') {
+      pushRaw(',');
+      if (inSelectList && depth === 0 && caseDepth === 0) newline(1);
+      else {
+        pushRaw(' ');
+        noGap = true;
+      }
+      continue;
+    }
+    if (tok.v === ';') {
+      const flat = out.join('');
+      if (/;\s*$/.test(flat)) continue;
+      pushRaw(';');
+      out.push('\n\n');
+      lineLen = 0;
+      depth = 0;
+      caseDepth = 0;
+      inSelectList = false;
+      parenStack.length = 0;
+      noGap = false;
+      continue;
+    }
+
+    push(tok.v);
+  }
+
+  let text = out
+    .join('')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\(\s*\n\s*\)/g, '()')
+    .trim();
+  text = text.replace(/;+$/, '').trim();
+  return text ? text + ';' : '';
+}
+function formatSql() {
+  const sel = editor.getSelection();
+  if (sel) editor.insertText(formatSqlText(sel));
+  else editor.setValue(formatSqlText(editor.value), true);
+  toast('已格式化', 'success');
+}
+$('#format').addEventListener('click', formatSql);
+
+/* ======================= 查询执行 ======================= */
+/* ============ 分批流式查询 ============
+ * 大 limit（>5000 或不限）时按 5000/批 分页请求，逐批追加渲染，
+ * 批间留缓冲避免打挂服务端；导出使用已拉全的内存数据，天然分批安全。
+ */
+const BATCH_SIZE = 5000;
+const MAX_BATCH_ROWS = 100000; // 10 万行安全上限
+const PAGEABLE_DB = new Set(['mysql', 'tidb', 'clickhouse', 'starrocks', 'pgsql']);
+let stopBatchFlag = false;
+
+function wrapPagedSql(sql, offset) {
+  const inner = sql.trim().replace(/;+\s*$/, '');
+  return `select * from (${inner}) as _archery_page limit ${BATCH_SIZE} offset ${offset}`;
+}
+
+/** 把查询结果追加到已有 result（增量刷新当前视图） */
+function appendBatch(result, d) {
+  result.rows.push(...(d.rows || []));
+  result.queryTime = d.query_time ?? result.queryTime;
+  const r = activeResultData();
+  if (r === result) renderResultTable(result);
+  renderResultTabs();
+}
+
+async function runQuery() {
+  const instance = $('#instance-name').value;
+  const db = $('#db-name').value;
+  const schema = $('#schema-name').value;
+  const sql = editor.getSelection() || editor.value;
+  if (!instance) return toast('请先选择实例', 'error');
+  if (!db) return toast('请先选择数据库', 'error');
+  if (!sql.trim()) return toast('请输入 SQL 语句', 'error');
+
+  const limitNum = Number($('#limit-num').value);
+  const ins = state.instances.find((i) => i.instance_name === instance);
+  const dbType = ins?.db_type || 'mysql';
+  // 支持子查询分页的库、且 limit 超过单批阈值或选择不限时，走分批
+  const useBatch = PAGEABLE_DB.has(dbType) && (limitNum === 0 || limitNum > BATCH_SIZE);
+
+  const btn = $('#execute');
+  const cancelBtn = $('#cancel-query');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span><span>查询中…</span>';
+  const started = performance.now();
+  stopBatchFlag = false;
+  cancelBtn.hidden = !useBatch;
+  try {
+    if (!useBatch) {
+      const res = await state.api.query({
+        instanceName: instance, dbName: db, schemaName: schema,
+        sqlContent: sql, limitNum: $('#limit-num').value,
+      });
+      if (res.status !== 0) {
+        pushResult({ kind: 'error', title: '错误', sql, target: `${instance}/${db}`, error: res.msg });
+        toast(res.msg, 'error');
+        return;
+      }
+      const d = res.data;
+      refreshActiveTabTitle();
+      pushResult({
+        kind: 'query', title: '结果', sql: d.full_sql || sql, target: `${instance}/${db}`,
+        columns: d.column_list || [], columnTypes: d.column_type || [], rows: d.rows || [],
+        affected: d.affected_rows ?? d.effect_row, queryTime: d.query_time,
+        maskTime: d.mask_time, lag: d.seconds_behind_master, warning: d.warning,
+      });
+      saveDraft();
+      return;
+    }
+
+    // ---- 分批模式 ----
+    let offset = 0;
+    let batch = 0;
+    let result = null;
+    let firstD = null;
+    while (true) {
+      if (stopBatchFlag) {
+        toast(`已停止：共加载 ${result?.rows.length ?? 0} 行`, 'info');
+        break;
+      }
+      if (offset >= MAX_BATCH_ROWS) {
+        toast(`已达安全上限 ${MAX_BATCH_ROWS} 行，如需更多请缩小查询范围`, 'error');
+        break;
+      }
+      const res = await state.api.query({
+        instanceName: instance, dbName: db, schemaName: schema,
+        sqlContent: wrapPagedSql(sql, offset), limitNum: BATCH_SIZE,
+      });
+      if (res.status !== 0) {
+        if (!result) {
+          pushResult({ kind: 'error', title: '错误', sql, target: `${instance}/${db}`, error: res.msg });
+        }
+        toast(res.msg, 'error');
+        break;
+      }
+      const d = res.data;
+      batch += 1;
+      if (!result) {
+        firstD = d;
+        refreshActiveTabTitle();
+        result = pushResult({
+          kind: 'query', title: '结果', sql: sql, target: `${instance}/${db}`,
+          columns: d.column_list || [], columnTypes: d.column_type || [], rows: d.rows || [],
+          affected: d.affected_rows, queryTime: d.query_time, maskTime: d.mask_time,
+          lag: d.seconds_behind_master, warning: d.warning, batched: true,
+          filter: '', sortKey: -1, sortDir: 1, page: 1, pageSize: 100,
+        });
+      } else {
+        appendBatch(result, d);
+      }
+      const rows = d.rows || [];
+      $('#result-summary').textContent =
+        `分批加载中 · 已 ${result.rows.length} 行（第 ${batch} 批 ×${BATCH_SIZE}）· ${timestamp()}`;
+      if (rows.length < BATCH_SIZE) break; // 没有更多数据
+      offset += BATCH_SIZE;
+      await new Promise((r) => setTimeout(r, 250)); // 批间缓冲
+    }
+    if (result) {
+      result.batchInfo = `分批 ${batch} 次 × ${BATCH_SIZE}`;
+      renderResultTabs();
+      const r = activeResultData();
+      if (r === result) renderResultTable(result);
+      saveDraft();
+    }
+  } catch (e) {
+    pushResult({ kind: 'error', title: '错误', sql, target: `${instance}/${db}`, error: e.message });
+    toast(e.message, 'error');
+    if (e.needLogin) setConnection(false, '需要重新登录');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `${icon('play')}<span>运行查询</span>`;
+    mountIcons(btn);
+    cancelBtn.hidden = true;
+    $('#query-timing').textContent = `耗时 ${((performance.now() - started) / 1000).toFixed(2)} s`;
+  }
+}
+$('#execute').addEventListener('click', runQuery);
+$('#cancel-query').addEventListener('click', () => {
+  stopBatchFlag = true;
+});
+
+/** EXPLAIN：按实例类型给 SQL 加前缀后执行（对应 Archery 查询页行为） */
+async function runExplain() {
+  const instance = $('#instance-name').value;
+  const ins = state.instances.find((i) => i.instance_name === instance);
+  const sql = editor.getSelection() || editor.value;
+  if (!instance || !$('#db-name').value) return toast('请先选择实例和数据库', 'error');
+  if (!sql.trim()) return toast('请输入 SQL 语句', 'error');
+  const type = ins?.db_type || 'mysql';
+  let explainSql;
+  if (['mysql', 'tidb', 'clickhouse', 'mongo'].includes(type)) {
+    explainSql = `explain ${sql}`;
+  } else if (type === 'oracle') {
+    explainSql = `explain plan for ${sql}`;
+  } else {
+    return toast(`${DB_TYPE_LABEL[type] || type} 暂不支持在线查看执行计划`, 'error');
+  }
+  const btn = $('#explain');
+  btn.disabled = true;
+  try {
+    const res = await state.api.query({
+      instanceName: instance,
+      dbName: $('#db-name').value,
+      schemaName: $('#schema-name').value,
+      sqlContent: explainSql,
+      limitNum: $('#limit-num').value,
+    });
+    if (res.status !== 0) {
+      pushResult({ kind: 'error', title: '错误', sql: explainSql, target: `${instance}/${$('#db-name').value}`, error: res.msg });
+      return toast(res.msg, 'error');
+    }
+    pushResult({
+      kind: 'query',
+      title: '执行计划',
+      isExplain: true,
+      sql: res.data.full_sql || explainSql,
+      target: `${instance}/${$('#db-name').value}`,
+      columns: res.data.column_list || [],
+      columnTypes: res.data.column_type || [],
+      rows: res.data.rows || [],
+      affected: res.data.affected_rows,
+      queryTime: res.data.query_time,
+    });
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+$('#explain').addEventListener('click', runExplain);
+
+/* 结果区放大 / 还原 */
+$('#expand-results').addEventListener('click', () => {
+  document.body.classList.toggle('results-expanded');
+});
+/* 结构查看自动收起编辑器后，点击 SQL 标签栏即可回到编辑器 */
+$('.query-tabbar-top').addEventListener('click', (e) => {
+  if (document.body.classList.contains('results-expanded') && !e.target.closest('.result-tab')) {
+    document.body.classList.remove('results-expanded');
+    editor.ta.focus();
+  }
+});
+
+/* ======================= 结果 tab 管理 ======================= */
+function pushResult(data) {
+  state.resultSeq += 1;
+  const result = {
+    id: state.resultSeq,
+    ...data,
+    filter: '',
+    sortKey: -1,
+    sortDir: 1,
+    page: 1,
+    pageSize: 100,
+  };
+  state.results.push(result);
+  state.activeResult = result.id;
+  renderResultTabs();
+  renderActiveResult();
+  return result;
+}
+
+function renderResultTabs() {
+  const bar = $('#result-tabs');
+  bar.replaceChildren();
+  for (const r of state.results) {
+    const label =
+      r.kind === 'error' ? '错误' : r.kind === 'describe' ? r.title : `结果 ${r.id}`;
+    const badge = r.kind === 'query' ? `<span class="badge">${r.rows?.length ?? 0}</span>` : '';
+    const tab = el(`<div class="result-tab ${r.id === state.activeResult ? 'active' : ''} ${r.kind === 'error' ? 'is-error' : ''}"
+      data-id="${r.id}" title="${escapeHtml(r.target || '')} · ${escapeHtml(r.sql || '').slice(0, 120)}">
+      <span>${escapeHtml(label)}</span>${badge}
+      <span class="close-x">${icon('close')}</span>
+    </div>`);
+    tab.addEventListener('click', (e) => {
+      if (e.target.closest('.close-x')) {
+        state.results = state.results.filter((x) => x.id !== r.id);
+        if (state.activeResult === r.id) {
+          state.activeResult = state.results.at(-1)?.id ?? null;
+        }
+        renderResultTabs();
+        renderActiveResult();
+        return;
+      }
+      state.activeResult = r.id;
+      renderResultTabs();
+      renderActiveResult();
+    });
+    bar.appendChild(tab);
+  }
+}
+$('#clear-results').addEventListener('click', () => {
+  state.results = [];
+  state.activeResult = null;
+  renderResultTabs();
+  renderActiveResult();
+});
+
+function activeResultData() {
+  return state.results.find((r) => r.id === state.activeResult) || null;
+}
+
+function renderActiveResult() {
+  const r = activeResultData();
+  const content = $('#result-content');
+  const tools = $('#result-tools');
+  const footer = $('#result-footer');
+  if (!r) {
+    tools.hidden = true;
+    $('#pagination').hidden = true;
+    document.body.classList.remove('results-expanded');
+    $('#result-summary').textContent = '准备就绪';
+    content.replaceChildren(
+      el(`<div class="result-placeholder">${icon('grid')}<span>执行查询后，结果会保留在这里，可切换回看与导出</span></div>`)
+    );
+    return;
+  }
+  if (r.kind === 'error') {
+    tools.hidden = true;
+    $('#pagination').hidden = true;
+    document.body.classList.remove('results-expanded');
+    $('#result-summary').textContent = `${r.target || ''} · ${timestamp()}`;
+    content.replaceChildren(
+      el(`<div class="banner" style="margin:10px">${icon('alert')}<span>${escapeHtml(r.error)}</span></div>`)
+    );
+    return;
+  }
+  if (r.kind === 'describe') {
+    tools.hidden = true;
+    $('#pagination').hidden = true;
+    $('#result-summary').textContent = `${r.target} · ${timestamp()}`;
+    renderDescribeView(r);
+    return;
+  }
+  // 查询/错误结果恢复编辑器布局（用户手动放大的可再点放大按钮）
+  document.body.classList.remove('results-expanded');
+
+  // 普通查询结果
+  tools.hidden = false;
+  updateExportButtons();
+  renderResultTable(r);
+}
+
+/** EXPLAIN 执行计划单元格着色：全表扫描红、走索引绿、大扫描量橙 */
+function explainCellClass(colName, val) {
+  if (val === null || val === undefined || val === '') return '';
+  const v = String(val).toLowerCase();
+  switch (colName) {
+    case 'type':
+      if (v === 'all') return 'ex-bad';
+      if (v === 'index') return 'ex-warn';
+      if (['range', 'index_merge', 'ref_or_null'].includes(v)) return 'ex-mid';
+      if (['ref', 'eq_ref', 'const', 'system', 'null', 'fulltext', 'unique_subquery', 'index_subquery'].includes(v)) return 'ex-good';
+      return '';
+    case 'key':
+      return val ? 'ex-good' : '';
+    case 'rows': {
+      const n = Number(val);
+      if (isNaN(n)) return '';
+      if (n >= 100000) return 'ex-bad';
+      if (n >= 10000) return 'ex-warn';
+      return '';
+    }
+    case 'extra':
+      if (/filesort|temporary/.test(v)) return 'ex-bad';
+      if (/using index( condition)?$/i.test(v)) return 'ex-good';
+      if (/using join buffer/.test(v)) return 'ex-mid';
+      return '';
+    default:
+      return '';
+  }
+}
+
+function renderResultTable(r) {
+  const { columns, rows } = r;
+  const content = $('#result-content');
+  const lowerCols = columns.map((c) => String(c).toLowerCase());
+  const explainMode = !!r.isExplain || (lowerCols.includes('type') && (lowerCols.includes('extra') || lowerCols.includes('key')));
+
+  // 排序（前端全量）
+  let data = rows;
+  if (r.filter) {
+    const f = r.filter.toLowerCase();
+    data = data.map((row) => [row, row.some((c) => String(c ?? '').toLowerCase().includes(f))])
+      .filter((x) => x[1])
+      .map((x) => x[0]);
+  }
+  if (r.sortKey >= 0) {
+    const k = r.sortKey;
+    data = [...data].sort((a, b) => {
+      const x = a[k], y = b[k];
+      if (x === null) return 1;
+      if (y === null) return -1;
+      const nx = Number(x), ny = Number(y);
+      if (!isNaN(nx) && !isNaN(ny)) return (nx - ny) * r.sortDir;
+      return String(x).localeCompare(String(y), 'zh-CN') * r.sortDir;
+    });
+  }
+
+  const total = data.length;
+  const pages = Math.max(1, Math.ceil(total / r.pageSize));
+  if (r.page > pages) r.page = pages;
+  const pageData = data.slice((r.page - 1) * r.pageSize, r.page * r.pageSize);
+
+  const table = document.createElement('table');
+  table.className = 'result-table';
+  const thead = document.createElement('thead');
+  const trh = document.createElement('tr');
+  columns.forEach((col, idx) => {
+    const th = document.createElement('th');
+    const arrow = r.sortKey === idx ? `<span class="arrow">${r.sortDir > 0 ? '▲' : '▼'}</span>` : '';
+    th.innerHTML = `${escapeHtml(col)}${arrow}`;
+    th.title = r.columnTypes?.[idx] ? `类型：${r.columnTypes[idx]}` : col;
+    th.addEventListener('click', () => {
+      if (r.sortKey === idx) r.sortDir = -r.sortDir;
+      else {
+        r.sortKey = idx;
+        r.sortDir = 1;
+      }
+      renderResultTable(r);
+    });
+    bindResultContextMenu(th, r, { colIndex: idx });
+    trh.appendChild(th);
+  });
+  thead.appendChild(trh);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  for (const row of pageData) {
+    const tr = document.createElement('tr');
+    bindResultContextMenu(tr, r, { row });
+    row.forEach((cell, ci) => {
+      const td = document.createElement('td');
+      if (cell === null || cell === undefined) {
+        td.textContent = 'NULL';
+        td.className = 'null';
+      } else {
+        td.textContent = String(cell);
+        if (String(cell).length > 120) {
+          td.classList.add('full');
+          td.title = String(cell);
+        }
+      }
+      const ex = explainMode ? explainCellClass(lowerCols[ci], cell) : '';
+      if (ex) td.classList.add(ex);
+      td.addEventListener('dblclick', () => {
+        navigator.clipboard.writeText(cell === null ? 'NULL' : String(cell));
+        toast('已复制单元格内容', 'success');
+      });
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  content.replaceChildren(table);
+
+  $('#pagination').hidden = false;
+  $('#page-size').value = String(r.pageSize);
+  $('#page-info').textContent = `${r.page} / ${pages}`;
+  $('#prev-page').disabled = r.page <= 1;
+  $('#next-page').disabled = r.page >= pages;
+
+  const extra = [];
+  if (r.batchInfo) extra.push(r.batchInfo);
+  if (r.queryTime) extra.push(`查询 ${r.queryTime}s`);
+  if (r.maskTime) extra.push(`脱敏 ${r.maskTime}s`);
+  if (r.lag) extra.push(`主从延迟 ${r.lag}s`);
+  $('#result-summary').textContent =
+    `${r.target} · ${total} 行${extra.length ? ' · ' + extra.join(' · ') : ''} · ${timestamp()}`;
+}
+
+$('#page-size').addEventListener('change', (e) => {
+  const r = activeResultData();
+  if (!r) return;
+  r.pageSize = Number(e.target.value);
+  r.page = 1;
+  renderResultTable(r);
+});
+$('#prev-page').addEventListener('click', () => {
+  const r = activeResultData();
+  if (!r) return;
+  r.page -= 1;
+  renderResultTable(r);
+});
+$('#next-page').addEventListener('click', () => {
+  const r = activeResultData();
+  if (!r) return;
+  r.page += 1;
+  renderResultTable(r);
+});
+$('#result-filter').addEventListener('input', (e) => {
+  const r = activeResultData();
+  if (!r) return;
+  r.filter = e.target.value;
+  r.page = 1;
+  renderResultTable(r);
+});
+
+/* ======================= 导出（隐藏开关） =======================
+ * 连点顶部头像 5 次启用导出（一次），导出完成自动隐藏。 */
+let exportUnlocked = false;
+let avatarClicks = 0;
+let avatarClickTimer = null;
+// 解锁次数每次进入页面随机（5-15），不固定规律
+const EXPORT_UNLOCK_TARGET = 5 + Math.floor(Math.random() * 11);
+$('#avatar').addEventListener('click', () => {
+  avatarClicks += 1;
+  clearTimeout(avatarClickTimer);
+  avatarClickTimer = setTimeout(() => (avatarClicks = 0), 5000);
+  if (avatarClicks >= EXPORT_UNLOCK_TARGET) {
+    avatarClicks = 0;
+    exportUnlocked = true;
+    updateExportButtons();
+    toast('导出已启用（本次有效）', 'success');
+  }
+});
+function updateExportButtons() {
+  const r = activeResultData();
+  const show = exportUnlocked && r?.kind === 'query' && !!r.rows?.length;
+  for (const id of ['export-csv', 'export-excel', 'export-json']) {
+    $('#' + id).hidden = !show;
+  }
+}
+
+/* ======================= 导出 ======================= */
+function exportActive(type) {
+  const r = activeResultData();
+  if (!r || r.kind !== 'query' || !r.rows?.length) return toast('当前没有可导出的查询结果', 'error');
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  const name = `archery-${r.target.replace(/[\\/:*?"<>|]/g, '_')}-${stamp}`;
+  let data = r.rows;
+  if (r.filter) {
+    const f = r.filter.toLowerCase();
+    data = data.filter((row) => row.some((c) => String(c ?? '').toLowerCase().includes(f)));
+  }
+  if (r.sortKey >= 0) {
+    const k = r.sortKey;
+    data = [...data].sort((a, b) => {
+      const x = a[k], y = b[k];
+      const nx = Number(x), ny = Number(y);
+      if (!isNaN(nx) && !isNaN(ny)) return (nx - ny) * r.sortDir;
+      return String(x).localeCompare(String(y), 'zh-CN') * r.sortDir;
+    });
+  }
+  if (type === 'csv') {
+    const esc = (v) => (v === null || v === undefined ? '' : /[",\n\r]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
+    const csv = [r.columns.map(esc).join(','), ...data.map((row) => row.map(esc).join(','))].join('\r\n');
+    download(`${name}.csv`, '\uFEFF' + csv, 'text/csv');
+  } else if (type === 'json') {
+    const objs = data.map((row) => Object.fromEntries(r.columns.map((c, i) => [c, row[i]])));
+    download(`${name}.json`, JSON.stringify(objs, null, 2), 'application/json');
+  } else if (type === 'excel') {
+    const cell = (v) => `<td>${escapeHtml(v ?? '')}</td>`;
+    const html = `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body>
+      <table border="1"><thead><tr>${r.columns.map((c) => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
+      <tbody>${data.map((row) => `<tr>${row.map(cell).join('')}</tr>`).join('')}</tbody></table></body></html>`;
+    download(`${name}.xls`, html, 'application/vnd.ms-excel');
+  }
+  toast(`已导出 ${data.length} 行`, 'success');
+  exportUnlocked = false;
+  updateExportButtons();
+}
+$('#export-csv').addEventListener('click', () => exportActive('csv'));
+$('#export-excel').addEventListener('click', () => exportActive('excel'));
+$('#export-json').addEventListener('click', () => exportActive('json'));
+
+/* ======================= 结果表格右键菜单 ======================= */
+function sqlValue(v) {
+  if (v === null || v === undefined) return 'NULL';
+  if (typeof v === 'number') return String(v);
+  return "'" + String(v).replace(/'/g, "''") + "'";
+}
+
+/** 解析建表语句中的主键列 */
+const pkCache = new Map();
+async function getTablePk(instanceName, dbName, tableName) {
+  const key = `${instanceName}/${dbName}/${tableName}`;
+  if (pkCache.has(key)) return pkCache.get(key);
+  let pk = [];
+  try {
+    const res = await state.api.describe(instanceName, dbName, tableName);
+    const createSql = res.data?.rows?.[0]?.[1] || '';
+    const m = createSql.match(/PRIMARY\s+KEY\s*\(([^)]+)\)/i);
+    if (m) pk = [...m[1].matchAll(/`(\w+)`/g)].map((x) => x[1]);
+  } catch { /* 忽略，退化用全部列做 WHERE */ }
+  pkCache.set(key, pk);
+  return pk;
+}
+
+/** 结果单元格/列头/行的右键菜单 */
+function bindResultContextMenu(el2, r, { colIndex = null, row = null } = {}) {
+  el2.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation(); // 阻止 document 级关闭逻辑误杀本菜单
+    const items = [];
+    // 行内右键时动态识别所在列
+    const ci = colIndex !== null ? colIndex : e.target.closest('td')?.cellIndex ?? null;
+    const useCol = ci !== null && ci < r.columns.length;
+    const colIndexFinal = useCol ? ci : null;
+    if (useCol) {
+      const colIndex = colIndexFinal;
+      const col = r.columns[colIndex];
+      const vals = r.rows.map((row) => row[colIndex]);
+      items.push({
+        label: '导出结果为 INSERT 语句',
+        icon: 'download',
+        action: () => exportInserts(r),
+      });
+      items.push({
+        label: `复制「${col}」为 IN 列表`,
+        icon: 'copy',
+        action: () => {
+          const numeric = vals.every((v) => v === null || typeof v === 'number');
+          const list = vals.map((v) => (numeric ? (v ?? 'NULL') : sqlValue(v)));
+          const lines = [];
+          for (let i = 0; i < list.length; i += 4) lines.push('  ' + list.slice(i, i + 4).join(', '));
+          navigator.clipboard.writeText(`in (\n${lines.join(',\n')}\n)`);
+          toast(`已复制 ${vals.length} 个值为 IN 列表`, 'success');
+        },
+      });
+      items.push({
+        label: `复制「${col}」整列（换行分隔）`,
+        icon: 'copy',
+        action: () => {
+          navigator.clipboard.writeText(vals.map((v) => (v === null ? '' : String(v))).join('\n'));
+          toast('已复制整列', 'success');
+        },
+      });
+    }
+    if (row !== null) {
+      items.push({
+        label: '生成 INSERT 语句',
+        icon: 'code',
+        action: () => genRowSql(r, row, 'insert'),
+      });
+      items.push({
+        label: '生成 UPDATE 语句',
+        icon: 'code',
+        action: () => genRowSql(r, row, 'update'),
+      });
+      items.push({
+        label: '复制整行（Tab 分隔）',
+        icon: 'copy',
+        action: () => {
+          navigator.clipboard.writeText(row.map((v) => (v === null ? 'NULL' : String(v))).join('	'));
+          toast('已复制整行', 'success');
+        },
+      });
+      // JSON 格式化：对象值直接展开，字符串值尝试解析
+      let cell = useCol ? row[colIndexFinal] : row.find((v) => typeof v === 'string' && /^[{[]/.test(v));
+      let parsed = null;
+      if (cell !== null && cell !== undefined && typeof cell === 'object') {
+        parsed = cell;
+      } else if (typeof cell === 'string' && /^[{[]/.test(cell)) {
+        try {
+          parsed = JSON.parse(cell);
+        } catch { /* 非 JSON 忽略 */ }
+      }
+      if (parsed && typeof parsed === 'object') {
+        items.push({
+          label: '格式化 JSON',
+          icon: 'eye',
+          action: () => {
+            const pre = document.createElement('pre');
+            pre.textContent = JSON.stringify(parsed, null, 2);
+            openModal('JSON 查看器', pre);
+          },
+        });
+      }
+    }
+    if (items.length) showContextMenu(e.clientX, e.clientY, items);
+  });
+}
+
+/** 行 → INSERT/UPDATE 语句（弹窗选表 + 预览） */
+async function genRowSql(r, row, kind) {
+  const targetDb = r.target.split('/')[1];
+  const instanceName = r.target.split('/')[0];
+  if (!currentTables.length) await preloadTables();
+  if (!currentTables.length) return toast('当前库表列表未加载，无法选择表', 'error');
+
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <label class="setting-row"><span>目标表（${escapeHtml(instanceName)}/${escapeHtml(targetDb)}）</span>
+      <select id="gensql-table" class="select" style="width:100%">
+        ${currentTables.map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('')}
+      </select></label>
+    <div class="setting-actions">
+      <button class="button small" id="gensql-cancel">取消</button>
+      <button class="button small primary" id="gensql-gen">生成</button>
+    </div>
+    <pre id="gensql-preview" hidden></pre>
+    <div class="setting-actions" id="gensql-copy-row" hidden>
+      <button class="button small primary" id="gensql-copy">复制并插入编辑器</button>
+    </div>`;
+  openModal(kind === 'insert' ? '生成 INSERT' : '生成 UPDATE', body);
+
+  body.querySelector('#gensql-cancel').addEventListener('click', closeModal);
+  body.querySelector('#gensql-gen').addEventListener('click', async () => {
+    const table = body.querySelector('#gensql-table').value;
+    const cols = await getTableColumns(instanceName, targetDb, table);
+    // 结果列与表字段取交集（保序按表字段）
+    const pairs = cols
+      .map((c) => {
+        const idx = r.columns.indexOf(c);
+        return idx >= 0 ? { c, v: row[idx] } : null;
+      })
+      .filter(Boolean);
+    if (!pairs.length) {
+      toast('结果列与表字段无交集，无法生成', 'error');
+      return;
+    }
+    let sqlText;
+    if (kind === 'insert') {
+      sqlText = `INSERT INTO \`${table}\` (${pairs.map((p) => '\`' + p.c + '\`').join(', ')})
+VALUES (${pairs.map((p) => sqlValue(p.v)).join(', ')});`;
+    } else {
+      const pk = await getTablePk(instanceName, targetDb, table);
+      const whereCols = pk.filter((c) => pairs.some((p) => p.c === c));
+      const useCols = whereCols.length ? whereCols : pairs.map((p) => p.c);
+      const setPart = pairs.filter((p) => !useCols.includes(p.c));
+      const setSql = (setPart.length ? setPart : pairs).map((p) => `\`${p.c}\` = ${sqlValue(p.v)}`).join(',\n  ');
+      const whereSql = useCols.map((c) => {
+        const p = pairs.find((x) => x.c === c);
+        return `\`${c}\` = ${sqlValue(p.v)}`;
+      }).join('\n  AND ');
+      sqlText = `UPDATE \`${table}\`\nSET ${setSql}\nWHERE ${whereSql};`;
+    }
+    const pre = body.querySelector('#gensql-preview');
+    pre.hidden = false;
+    pre.textContent = sqlText;
+    const actions = body.querySelector('#gensql-copy-row');
+    actions.hidden = false;
+    actions.querySelector('#gensql-copy').onclick = () => {
+      editor.insertText(sqlText + '\n');
+      closeModal();
+      toast('已插入编辑器，请核对后走工单执行', 'success');
+    };
+  });
+}
+
+/* ======================= 表结构查看 ======================= */
+
+/* ======================= 侧边栏：对象 / 字段 双模式 ======================= */
+$('#mode-object').addEventListener('click', () => setSidebarMode('object'));
+$('#mode-column').addEventListener('click', () => setSidebarMode('column'));
+function setSidebarMode(mode) {
+  const isCol = mode === 'column';
+  $('#mode-object').classList.toggle('active', !isCol);
+  $('#mode-column').classList.toggle('active', isCol);
+  $('#object-search-wrap').hidden = isCol;
+  $('#column-search-wrap').hidden = !isCol;
+  $('#column-results').hidden = !isCol;
+  $('#object-tree').style.display = isCol ? 'none' : '';
+  $('.object-heading').style.display = isCol ? 'none' : '';
+  if (isCol) $('#column-search').focus();
+}
+
+let columnSearchTimer = null;
+$('#column-search').addEventListener('input', (e) => {
+  clearTimeout(columnSearchTimer);
+  const kw = e.target.value.trim();
+  if (!kw) {
+    $('#column-results').replaceChildren();
+    return;
+  }
+  columnSearchTimer = setTimeout(() => searchColumns(kw), 350);
+});
+
+async function searchColumns(kw) {
+  const { instance, db } = state.current;
+  if (!instance || !db) {
+    $('#column-results').replaceChildren(
+      el(`<div class="tree-empty">请先在查询栏选择实例和数据库</div>`)
+    );
+    return;
+  }
+  const ins = state.instances.find((i) => i.instance_name === instance);
+  if (!['mysql', 'tidb'].includes(ins?.db_type || '')) {
+    $('#column-results').replaceChildren(
+      el(`<div class="tree-empty">字段搜索目前支持 MySQL / TiDB</div>`)
+    );
+    return;
+  }
+  $('#column-results').replaceChildren(el(`<div class="tree-empty">搜索中…</div>`));
+  try {
+    const sql =
+      `select table_name, column_name, column_type, column_comment ` +
+      `from information_schema.columns ` +
+      `where table_schema='${db.replace(/'/g, "''")}' and column_name like '%${kw.replace(/'/g, "''")}%' ` +
+      `order by table_name, ordinal_position limit 200`;
+    const res = await state.api.query({ instanceName: instance, dbName: db, sqlContent: sql, limitNum: 200 });
+    if (res.status !== 0) throw new Error(res.msg);
+    const rows = res.data.rows || [];
+    const box = $('#column-results');
+    box.replaceChildren();
+    if (!rows.length) {
+      box.replaceChildren(el(`<div class="tree-empty">没有匹配的字段</div>`));
+      return;
+    }
+    for (const [tbl, colName, colType, comment] of rows) {
+      const item = el(`<div class="column-result-item" title="点击查看建表语句">
+        <div class="tbl">${escapeHtml(tbl)}</div>
+        <div class="col">${escapeHtml(colName)} <span style="color:var(--text-3)">${escapeHtml(colType || '')}</span></div>
+        <div class="meta">${escapeHtml(comment || '')}</div>
+      </div>`);
+      item.addEventListener('click', () => describeTable({ name: instance, instance_name: instance }, db, tbl));
+      box.appendChild(item);
+    }
+    const head = el(`<div class="tree-empty" style="padding:6px">共 ${rows.length} 个匹配字段${rows.length >= 200 ? '（达上限）' : ''}</div>`);
+    box.prepend(head);
+  } catch (e2) {
+    $('#column-results').replaceChildren(el(`<div class="tree-empty">${escapeHtml(e2.message)}</div>`));
+  }
+}
+
+/* ======================= 结果图表可视化 ======================= */
+const CHART_COLORS = ['#2dd4bf', '#6ea8fe', '#f16b5e', '#e5a835', '#b78af7', '#4ade80', '#f472b6', '#94a3b8'];
+
+/** 图表数值解析：number 直取，字符串数字（含千分位）解析，其余（含 NULL/日期/文本）返回 null */
+function chartToNum(v) {
+  if (typeof v === 'number') return isFinite(v) ? v : null;
+  if (v === null || v === undefined || v === '') return null;
+  const s = String(v).replace(/[,，\s]/g, '');
+  return /^-?\d*\.?\d+(e[+-]?\d+)?$/i.test(s) && isFinite(Number(s)) ? Number(s) : null;
+}
+
+function openChart(r) {
+  r.chart = r.chart || { x: 0, ys: [], type: 'bar' };
+  if (!r.chart.ys.length) {
+    const head = r.rows.slice(0, 50);
+    r.chart.ys = r.columns
+      .map((c, i) => ({ c, i }))
+      // 数值列：样本里至少有一个可解析数值，且没有既非数值也非 NULL 的脏值
+      .filter(({ i }) => head.some((row) => chartToNum(row[i]) !== null) && head.every((row) => chartToNum(row[i]) !== null))
+      .slice(0, 3)
+      .map(({ i }) => i);
+    // X 轴默认取第一个非数值列（没有则保持第 0 列）
+    const firstCat = r.columns.findIndex((c, i) => !r.chart.ys.includes(i));
+    if (firstCat >= 0) r.chart.x = firstCat;
+  }
+  renderChart(r);
+}
+
+function renderChart(r) {
+  const content = $('#result-content');
+  const panel = document.createElement('div');
+  panel.className = 'chart-panel';
+
+  const xOpts = r.columns
+    .map((c, i) => `<option value="${i}" ${i === r.chart.x ? 'selected' : ''}>${escapeHtml(c)}</option>`)
+    .join('');
+  const yOpts = r.columns
+    .map((c, i) => `<option value="${i}" ${r.chart.ys.includes(i) ? 'selected' : ''}>${escapeHtml(c)}</option>`)
+    .join('');
+  panel.innerHTML = `
+    <div class="chart-controls">
+      <label class="bar-field"><span>X 轴</span><select id="chart-x" class="select">${xOpts}</select></label>
+      <label class="bar-field"><span>Y 轴（可多选数值列）</span><select id="chart-y" class="select" multiple style="height:64px;min-width:150px">${yOpts}</select></label>
+      <label class="bar-field"><span>类型</span>
+        <select id="chart-type" class="select">
+          <option value="bar" ${r.chart.type === 'bar' ? 'selected' : ''}>柱状图</option>
+          <option value="line" ${r.chart.type === 'line' ? 'selected' : ''}>折线图</option>
+        </select></label>
+      <button class="button small" id="chart-back">返回表格</button>
+    </div>
+    <div class="chart-legend" id="chart-legend"></div>
+    <div class="chart-svg-wrap"><svg class="chart-svg" id="chart-svg" width="900" height="420"></svg></div>`;
+  content.replaceChildren(panel);
+
+  panel.querySelector('#chart-x').addEventListener('change', (e) => {
+    r.chart.x = Number(e.target.value);
+    renderChart(r);
+  });
+  panel.querySelector('#chart-y').addEventListener('change', (e) => {
+    r.chart.ys = [...e.target.selectedOptions].map((o) => Number(o.value));
+    renderChart(r);
+  });
+  panel.querySelector('#chart-type').addEventListener('change', (e) => {
+    r.chart.type = e.target.value;
+    renderChart(r);
+  });
+  panel.querySelector('#chart-back').addEventListener('click', () => {
+    delete r.chartOpen;
+    renderResultTable(r);
+  });
+
+  drawChart(r, panel.querySelector('#chart-svg'), panel.querySelector('#chart-legend'));
+  r.chartOpen = true;
+}
+
+function drawChart(r, svg, legend) {
+  const xs = r.rows.map((row) => String(row[r.chart.x] ?? ''));
+  const series = r.chart.ys
+    .map((i) => ({ i, name: r.columns[i], data: r.rows.map((row) => chartToNum(row[i])) }))
+    .filter((s) => s.name !== undefined);
+  let idxs = xs.map((_, i) => i);
+  if (idxs.length > 80) {
+    const step = Math.ceil(idxs.length / 80);
+    idxs = idxs.filter((_, i) => i % step === 0);
+  }
+  const labels = idxs.map((i) => xs[i]);
+  const sData = series.map((s) => idxs.map((i) => s.data[i]));
+
+  const W = Math.max(900, labels.length * 46);
+  const H = 420;
+  const padL = 56, padR = 16, padT = 18, padB = 46;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const bandW = plotW / Math.max(1, labels.length);
+  // 空值（NULL/文本）不参与刻度计算
+  const maxV = Math.max(1, ...sData.flat().filter((v) => v !== null));
+  const yScale = (v) => padT + plotH - (v / maxV) * plotH;
+
+  let out = `<g>`;
+  for (let t = 0; t <= 4; t++) {
+    const v = (maxV / 4) * t;
+    const y = yScale(v);
+    out += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="currentColor" opacity="0.15" stroke-width="1"/>`;
+    out += `<text x="${padL - 8}" y="${y + 4}" text-anchor="end" font-size="10" fill="currentColor" opacity="0.55">${formatTick(v)}</text>`;
+  }
+  labels.forEach((lb, i) => {
+    const cx = padL + bandW * i + bandW / 2;
+    out += `<text x="${cx}" y="${H - 24}" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.55">${escapeHtml(lb.length > 10 ? lb.slice(0, 10) + '…' : lb)}</text>`;
+  });
+  series.forEach((s, si) => {
+    const color = CHART_COLORS[si % CHART_COLORS.length];
+    if (r.chart.type === 'bar') {
+      const barW = Math.max(3, (bandW * 0.7) / Math.max(1, series.length));
+      sData[si].forEach((v, i) => {
+        if (v === null) return; // 空值不画柱，避免误导为 0
+        const x = padL + bandW * i + bandW / 2 - (series.length * barW) / 2 + si * barW;
+        out += `<rect x="${x}" y="${yScale(v)}" width="${Math.max(1, barW - 1)}" height="${Math.max(0, padT + plotH - yScale(v))}" fill="${color}" rx="1.5"><title>${escapeHtml(labels[i])}: ${v}</title></rect>`;
+      });
+    } else {
+      // 折线在空值处断开（分段），而不是落到 0
+      let seg = [];
+      const flush = () => {
+        if (seg.length > 1) out += `<polyline points="${seg.join(' ')}" fill="none" stroke="${color}" stroke-width="2"/>`;
+        else if (seg.length === 1) out += `<circle cx="${seg[0].split(',')[0]}" cy="${seg[0].split(',')[1]}" r="2.5" fill="${color}"/>`;
+        seg = [];
+      };
+      sData[si].forEach((v, i) => {
+        if (v === null) { flush(); return; }
+        const px = padL + bandW * i + bandW / 2;
+        seg.push(`${px},${yScale(v)}`);
+        out += `<circle cx="${px}" cy="${yScale(v)}" r="2.5" fill="${color}"><title>${escapeHtml(labels[i])}: ${v}</title></circle>`;
+      });
+      flush();
+    }
+  });
+  out += `</g>`;
+  svg.setAttribute('width', W);
+  svg.style.color = 'var(--text-2)';
+  svg.innerHTML = out;
+  legend.replaceChildren(
+    ...series.map((s, si) => {
+      const c = CHART_COLORS[si % CHART_COLORS.length];
+      const span = document.createElement('span');
+      span.innerHTML = `<i style="background:${c}"></i>${escapeHtml(s.name)}`;
+      return span;
+    })
+  );
+}
+
+function formatTick(v) {
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'k';
+  return String(Math.round(v * 100) / 100);
+}
+
+$('#chart-toggle').addEventListener('click', () => {
+  const r = activeResultData();
+  if (!r || r.kind !== 'query' || !r.rows?.length) return toast('当前没有可图表化的查询结果', 'error');
+  if (r.chartOpen) {
+    delete r.chartOpen;
+    renderResultTable(r);
+  } else {
+    openChart(r);
+  }
+});
+
+/* ======================= 结果集对比 ======================= */
+$('#compare-toggle').addEventListener('click', () => {
+  const a = activeResultData();
+  if (!a || a.kind !== 'query' || !a.rows?.length) return toast('请先在一个查询结果上打开对比', 'error');
+  const others = state.results.filter((x) => x !== a && x.kind === 'query' && x.rows);
+  if (!others.length) return toast('没有其他查询结果可对比，先再执行一个查询', 'error');
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <div class="setting-row"><span>选择要对比的结果（当前：${escapeHtml(a.target)} · ${a.rows.length} 行）</span>
+      <select id="cmp-pick" class="select" style="width:100%">
+        ${others
+          .map(
+            (x) =>
+              `<option value="${x.id}">${escapeHtml(x.target)} · ${x.rows.length} 行 · ${escapeHtml((x.sql || '').slice(0, 40))}</option>`
+          )
+          .join('')}
+      </select></div>
+    <div class="setting-actions">
+      <button class="button small" id="cmp-cancel">取消</button>
+      <button class="button small primary" id="cmp-go">对比</button>
+    </div>
+    <div id="cmp-result"></div>`;
+  openModal('结果集对比', body);
+  body.querySelector('#cmp-cancel').addEventListener('click', closeModal);
+  body.querySelector('#cmp-go').addEventListener('click', () => {
+    const b = state.results.find((x) => x.id === Number(body.querySelector('#cmp-pick').value));
+    if (b) renderCompare(a, b, body.querySelector('#cmp-result'));
+  });
+});
+
+function renderCompare(a, b, box) {
+  const colsSame =
+    a.columns.length === b.columns.length && a.columns.every((c, i) => c === b.columns[i]);
+  const keyOf = (row) => JSON.stringify(row);
+  const setA = new Map(a.rows.map((row, i) => [keyOf(row), { row, i }]));
+  const setB = new Map(b.rows.map((row, i) => [keyOf(row), { row, i }]));
+  const onlyA = [...setA.entries()].filter(([k]) => !setB.has(k));
+  const onlyB = [...setB.entries()].filter(([k]) => !setA.has(k));
+  const common = setA.size - onlyA.length;
+
+  const section = (title, count, color, rows, cols) => {
+    const div = document.createElement('div');
+    div.style.cssText = 'display:flex;flex-direction:column;gap:6px';
+    const h = document.createElement('strong');
+    h.style.color = `var(--${color})`;
+    h.textContent = `${title}（${count} 行）`;
+    div.appendChild(h);
+    if (rows.length) {
+      const tbl = document.createElement('table');
+      tbl.className = 'data-table';
+      tbl.innerHTML =
+        `<thead><tr>${cols.map((c) => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>` +
+        `<tbody>${rows
+          .slice(0, 50)
+          .map(
+            ([, { row }]) =>
+              `<tr>${row.map((v) => `<td class="sql-cell">${escapeHtml(v === null ? 'NULL' : String(v))}</td>`).join('')}</tr>`
+          )
+          .join('')}</tbody>`;
+      div.appendChild(tbl);
+      if (rows.length > 50) {
+        const more = document.createElement('p');
+        more.style.cssText = 'margin:0;color:var(--text-3);font-size:11px';
+        more.textContent = `仅显示前 50 行，共 ${rows.length} 行`;
+        div.appendChild(more);
+      }
+    }
+    return div;
+  };
+
+  box.replaceChildren();
+  if (!colsSame) {
+    const warn = document.createElement('p');
+    warn.style.cssText = 'color:var(--warn);font-size:12px;margin:0';
+    warn.textContent = '注意：两个结果列不一致，按整行内容对比。';
+    box.appendChild(warn);
+  }
+  box.append(
+    section('仅 A 有', onlyA.length, 'danger', onlyA, a.columns),
+    section('仅 B 有', onlyB.length, 'info', onlyB, b.columns),
+    section('两边一致', common, 'success', [], a.columns)
+  );
+  toast(`对比完成：一致 ${common} · 仅A ${onlyA.length} · 仅B ${onlyB.length}`, 'success');
+}
+
+/** 导出全库数据字典（Markdown）：表 + 注释 + 字段清单，限 150 表 */
+async function exportDataDict(instanceName, dbName) {
+  const CAP = 150;
+  const insObj = state.instances.find((i) => i.instance_name === instanceName);
+  const dbType = insObj?.db_type || 'mysql';
+  if (!['mysql', 'tidb'].includes(dbType)) return toast('数据字典目前支持 MySQL / TiDB', 'error');
+  toast('正在生成数据字典…');
+  try {
+    const rl = await state.api.dictTableList(instanceName, dbName, dbType);
+    if (rl.status !== 0) throw new Error(rl.msg);
+    const raw = rl.data;
+    // 兼容两种返回：{db: [[表,注释],...]} 或 [[表,注释],...]
+    const entries = Array.isArray(raw) ? raw : Object.values(raw).flat();
+    const tables = entries.slice(0, CAP).map((t) => (Array.isArray(t) ? { name: t[0], comment: t[1] || '' } : { name: String(t), comment: '' }));
+    const truncated = entries.length > CAP;
+    const parts = [
+      `# 数据字典 · ${dbName}`,
+      '',
+      `- 实例：${instanceName}`,
+      `- 生成时间：${new Date().toLocaleString('zh-CN')}`,
+      `- 表数量：${tables.length}${truncated ? `（共 ${entries.length}，仅导出前 ${CAP}）` : ''}`,
+      '',
+    ];
+    let i = 0;
+    for (const t of tables) {
+      i += 1;
+      if (i % 10 === 0) toast(`生成中 ${i}/${tables.length}…`);
+      let desc = null;
+      try {
+        const info = await state.api.dictTableInfo(instanceName, dbName, t.name, dbType);
+        if (info.status === 0) desc = info.data.desc;
+      } catch { /* 单表失败不阻塞 */ }
+      parts.push(`## ${t.name}`, '');
+      if (t.comment) parts.push(`> ${t.comment}`, '');
+      if (desc?.column_list && desc.rows?.length) {
+        parts.push(
+          '| ' + desc.column_list.join(' | ') + ' |',
+          '| ' + desc.column_list.map(() => '---').join(' | ') + ' |',
+          ...desc.rows.map((r2) => '| ' + r2.map((v) => (v === null ? '' : String(v).replace(/\|/g, '\\|'))).join(' | ') + ' |')
+        );
+      } else {
+        parts.push('（字段信息获取失败）');
+      }
+      parts.push('');
+      await new Promise((r3) => setTimeout(r3, 30));
+    }
+    const filename = `数据字典-${dbName}-${new Date().toISOString().slice(0, 10)}.md`;
+    const md = parts.join('\n');
+    download(filename, md, 'text/markdown');
+    toast(`已导出 ${tables.length} 张表的字典`, 'success');
+    // 生成后弹窗预览，避免"下载没反应"
+    const preview = el('<div class="md-view dict-preview"></div>');
+    preview.innerHTML = renderMarkdown(md);
+    const bar = el(`<div class="setting-actions"><button class="button small primary" id="dict-dl">${icon('download')}<span>下载 Markdown</span></button></div>`);
+    bar.querySelector('#dict-dl').addEventListener('click', () => download(filename, md, 'text/markdown'));
+    const wrap = document.createElement('div');
+    wrap.append(bar, preview);
+    openModal(`数据字典 · ${dbName}（${tables.length} 张表${truncated ? `，共 ${entries.length}` : ''}）`, wrap, { wide: true });
+  } catch (e) {
+    toast(`导出失败：${e.message}`, 'error');
+  }
+}
+
+/** 查询结果 → 批量 INSERT 语句文件（从原 SQL 解析目标表名） */
+function exportInserts(r) {
+  if (!r.rows?.length) return toast('当前结果为空', 'error');
+  const fromMatch = (r.sql || '').match(/\bfrom\s+`?([\w$]+)`?/i);
+  const guessed = fromMatch ? fromMatch[1] : '';
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <label class="setting-row"><span>目标表名（INSERT INTO ?）</span>
+      <input id="ins-table" type="text" value="${escapeHtml(guessed)}" placeholder="表名" spellcheck="false"></label>
+    <label class="setting-row"><span>每批行数（多值 VALUES 合批）</span>
+      <select id="ins-batch" class="select" style="width:120px">
+        <option>100</option><option selected>500</option><option>1000</option>
+      </select></label>
+    <p style="margin:0;color:var(--text-3);font-size:12px">共 ${r.rows.length} 行 × ${r.columns.length} 列。NULL 保持 NULL，字符串自动转义。生成的语句仅供工单使用，本插件不直接执行。</p>
+    <div class="setting-actions">
+      <button class="button small" id="ins-cancel">取消</button>
+      <button class="button small primary" id="ins-go">生成并下载</button>
+    </div>`;
+  openModal('导出为 INSERT 语句', body);
+  body.querySelector('#ins-cancel').addEventListener('click', closeModal);
+  body.querySelector('#ins-go').addEventListener('click', () => {
+    const table = body.querySelector('#ins-table').value.trim();
+    if (!table) return toast('请填写目标表名', 'error');
+    const batch = Number(body.querySelector('#ins-batch').value);
+    const colSql = r.columns.map((c) => '`' + c + '`').join(', ');
+    const parts = [`-- 由 Archery 助手生成：${r.target} · ${r.rows.length} 行 · ${new Date().toLocaleString('zh-CN')}`, ''];
+    for (let i = 0; i < r.rows.length; i += batch) {
+      const chunk = r.rows.slice(i, i + batch);
+      const values = chunk
+        .map((row) => '(' + row.map((v) => sqlValue(v)).join(', ') + ')')
+        .join(',\n');
+      parts.push(`INSERT INTO \`${table}\` (${colSql}) VALUES\n${values};\n`);
+    }
+    closeModal();
+    download(`insert-${table}-${new Date().toISOString().slice(0, 10)}.sql`, parts.join('\n'), 'text/sql');
+    toast(`已导出 ${r.rows.length} 行 INSERT 语句`, 'success');
+  });
+}
+
+async function describeTable(ins, dbName, tableName) {
+  const insName = typeof ins === 'string' ? ins : ins.name || ins.instance_name;
+  const insObj = state.instances.find((i) => i.instance_name === insName);
+  const dbType = insObj?.db_type || 'mysql';
+  try {
+    // 优先走数据字典接口：一次拿全 字段/索引/建表语句
+    let dict = null;
+    if (['mysql', 'tidb'].includes(dbType)) {
+      try {
+        const r = await state.api.dictTableInfo(insName, dbName, tableName, dbType);
+        if (r.status === 0) dict = r.data;
+      } catch { /* 回退 describe */ }
+    }
+    if (dict) {
+      pushResult({
+        kind: 'describe',
+        title: tableName,
+        target: `${insName}/${dbName}`,
+        createSql: (dict.create_sql?.[0]?.[1] || '') + ';',
+        dictDesc: dict.desc || null,   // {column_list, rows}
+        dictIndex: dict.index || null, // {column_list, rows}
+        sql: `show create table ${tableName}`,
+      });
+      return;
+    }
+    const res = await state.api.describe(insName, dbName, tableName);
+    if (res.status !== 0) throw new Error(res.msg);
+    const d = res.data;
+    let createSql = null;
+    if (d.rows?.length === 1 && typeof d.rows[0][1] === 'string' && /CREATE TABLE/i.test(d.rows[0][1] || '')) {
+      createSql = `${d.rows[0][1]};`;
+    }
+    pushResult({
+      kind: 'describe',
+      title: tableName,
+      target: `${insName}/${dbName}`,
+      columns: d.column_list || [],
+      rows: d.rows || [],
+      createSql,
+      sql: d.full_sql,
+    });
+  } catch (e) {
+    pushResult({ kind: 'error', title: '错误', target: `${insName}/${dbName}`, error: `查看 ${tableName} 结构失败：${e.message}` });
+  }
+}
+
+/* describe 结果渲染为 字段/建表语句/索引 三个子视图 */
+function renderDescribeView(r) {
+  const content = $('#result-content');
+  content.replaceChildren();
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'display:flex;flex-direction:column;height:100%;min-height:0';
+
+  const tabs = document.createElement('div');
+  tabs.className = 'result-tabs';
+  // flex:none：抵消 .result-tabs 的 flex:1，避免纵向容器里页签栏被撑高把内容挤下去
+  tabs.style.cssText = 'padding:8px 10px 0;flex:none';
+  const views = [
+    { key: 'desc', label: '字段', on: !!r.dictDesc },
+    { key: 'create', label: '建表语句', on: !!r.createSql },
+    { key: 'index', label: '索引', on: !!r.dictIndex?.rows?.length },
+  ].filter((v) => v.on);
+  let active = views[0].key;
+  const body = document.createElement('div');
+  body.style.cssText = 'flex:1;min-height:0;overflow:auto';
+
+  const render = () => {
+    tabs.replaceChildren(
+      ...views.map((v) => {
+        const b = el(`<div class="result-tab ${v.key === active ? 'active' : ''}">${v.label}</div>`);
+        b.addEventListener('click', () => {
+          active = v.key;
+          render();
+        });
+        return b;
+      })
+    );
+    body.replaceChildren();
+    if (active === 'desc' && r.dictDesc) {
+      const t = document.createElement('table');
+      t.className = 'result-table';
+      t.innerHTML =
+        `<thead><tr>${(r.dictDesc.column_list || []).map((c) => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>` +
+        `<tbody>${(r.dictDesc.rows || [])
+          .map((row) => `<tr>${row.map((v) => `<td class="${v === null ? 'null' : ''}">${escapeHtml(v === null ? 'NULL' : String(v))}</td>`).join('')}</tr>`)
+          .join('')}</tbody>`;
+      body.appendChild(t);
+    } else if (active === 'create') {
+      const pre = document.createElement('div');
+      pre.className = 'create-table-view';
+      pre.textContent = r.createSql || '(未获取到)';
+      body.appendChild(pre);
+      const copyBtn = el(`<div style="padding:0 12px 10px"><button class="button small">${icon('copy')} 复制</button></div>`);
+      copyBtn.querySelector('button').addEventListener('click', () => {
+        navigator.clipboard.writeText(r.createSql || '');
+        toast('已复制', 'success');
+      });
+      body.appendChild(copyBtn);
+    } else if (active === 'index' && r.dictIndex) {
+      const t = document.createElement('table');
+      t.className = 'result-table';
+      t.innerHTML =
+        `<thead><tr>${(r.dictIndex.column_list || []).map((c) => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>` +
+        `<tbody>${(r.dictIndex.rows || [])
+          .map((row) => `<tr>${row.map((v) => `<td class="${v === null ? 'null' : ''}">${escapeHtml(v === null ? 'NULL' : String(v))}</td>`).join('')}</tr>`)
+          .join('')}</tbody>`;
+      body.appendChild(t);
+    }
+  };
+  render();
+  wrap.append(tabs, body);
+  content.replaceChildren(wrap);
+}
+
+/* ======================= 收藏最近执行 ======================= */
+function promptText(title, placeholder = '') {
+  return new Promise((resolve) => {
+    const body = document.createElement('div');
+    body.innerHTML = `
+      <label class="setting-row"><span>${escapeHtml(title)}</span>
+        <input id="prompt-input" type="text" placeholder="${escapeHtml(placeholder)}"></label>
+      <div class="setting-actions">
+        <button class="button small" id="prompt-cancel">取消</button>
+        <button class="button small primary" id="prompt-ok">确定</button>
+      </div>`;
+    openModal('输入', body);
+    const input = body.querySelector('#prompt-input');
+    input.focus();
+    const done = (v) => {
+      closeModal();
+      resolve(v);
+    };
+    body.querySelector('#prompt-ok').addEventListener('click', () => done(input.value));
+    body.querySelector('#prompt-cancel').addEventListener('click', () => done(null));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') done(input.value);
+    });
+  });
+}
+
+/* 收藏：选择存本地（分组+命名）或云端（直接命名）；结果栏「存本地」保持不变 */
+$('#save-favorite').addEventListener('click', () => {
+  const r = [...state.results].reverse().find((x) => x.kind === 'query');
+  const sql = r?.sql || editor.value;
+  if (!sql.trim()) return toast('还没有可收藏的 SQL', 'error');
+  const target = r?.target || `${$('#instance-name').value}/${$('#db-name').value}`;
+  const [instance = '', db = ''] = String(target).split('/');
+  const body = el(`<div>
+    <div class="sql-cell" style="font-family:var(--mono);font-size:12px;background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;max-height:76px;overflow:auto;margin-bottom:4px">${escapeHtml(sql.slice(0, 300))}</div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <button class="button favpick" id="favpick-local">${icon('star')}<span><b>存到本地收藏</b><small>仅本机保存 · 可选分组 · 支持一键查询</small></span></button>
+      <button class="button favpick" id="favpick-cloud">${icon('upload')}<span><b>存到云端收藏</b><small>同步 Archery 账号 · 任何设备可见</small></span></button>
+    </div>
+  </div>`);
+  body.querySelector('#favpick-local').addEventListener('click', () => {
+    closeModal();
+    openLocalSaveModal({ sql, instance, db });
+  });
+  body.querySelector('#favpick-cloud').addEventListener('click', async () => {
+    closeModal();
+    try {
+      const res = await state.api.queryLog({ limit: 1, offset: 0 });
+      const row = res.rows?.[0];
+      if (!row) throw new Error('未找到查询日志');
+      const alias = (await promptText('收藏别名（可留空）：', row.sqllog.slice(0, 40))) ?? '';
+      await state.api.favorite(row.id, true, alias);
+      toast('已收藏，可在「收藏」页查看', 'success');
+    } catch (e) {
+      toast(`收藏失败：${e.message}`, 'error');
+    }
+  });
+  openModal('收藏这条 SQL 到哪里？', body);
+});
+
+/* ======================= 查询历史 / 收藏 ======================= */
+function renderLogTable(tableEl, rows, { starMode = false } = {}) {
+  const table = typeof tableEl === 'string' ? $(tableEl) : tableEl;
+  table.innerHTML = '';
+  const thead = `<thead><tr>
+    <th style="width:140px">时间</th><th style="width:150px">实例 / 库</th>
+    <th>SQL</th><th style="width:70px" class="num">行数</th><th style="width:70px" class="num">耗时</th>
+    ${starMode ? '<th style="width:110px">别名</th>' : '<th style="width:80px">人员</th>'}
+    <th style="width:170px">操作</th></tr></thead>`;
+  const tbody = document.createElement('tbody');
+  for (const row of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(row.create_time)}</td>
+      <td title="${escapeHtml(row.instance_name)}">${escapeHtml(row.instance_name)}<br><span style="color:var(--text-3)">${escapeHtml(row.db_name)}</span></td>
+      <td class="sql-cell clamp" title="点击展开/收起完整 SQL">${escapeHtml(row.sqllog)}</td>
+      <td class="num">${escapeHtml(String(row.effect_row ?? ''))}</td>
+      <td class="num">${escapeHtml(String(row.cost_time ?? ''))}s</td>
+      ${starMode ? `<td>${escapeHtml(row.alias || '—')}</td>` : `<td>${escapeHtml(row.user_display)}</td>`}
+      <td><div class="row-actions">
+        <button class="button small" data-act="fill">回填</button>
+        <button class="button small" data-act="run">执行</button>
+        <button class="button small ${row.favorite ? 'primary' : ''}" data-act="star" title="收藏/取消">${row.favorite ? '★' : '☆'} 收藏</button>
+      </div></td>`;
+    tr.querySelector('.sql-cell').addEventListener('click', () => {
+      tr.classList.toggle('sql-expanded');
+      const cell = tr.querySelector('.sql-cell');
+      cell.classList.toggle('clamp');
+    });
+    tr.querySelector('[data-act="fill"]').addEventListener('click', () => fillFromLog(row));
+    tr.querySelector('[data-act="run"]').addEventListener('click', () => fillFromLog(row, true));
+    tr.querySelector('[data-act="star"]').addEventListener('click', async () => {
+      try {
+        const next = starMode ? false : !row.favorite;
+        await state.api.favorite(row.id, next, row.alias || '');
+        toast(next ? '已收藏' : '已取消收藏', 'success');
+        starMode ? loadFavorites() : loadHistory();
+      } catch (e) {
+        toast(`操作失败：${e.message}`, 'error');
+      }
+    });
+    tbody.appendChild(tr);
+  }
+  table.appendChild(el(thead));
+  table.appendChild(tbody);
+}
+
+async function fillFromLog(row, run = false) {
+  switchView('query');
+  // 尽量联动实例与库
+  if ($('#instance-name').querySelector(`option[value="${CSS.escape(row.instance_name)}"]`)) {
+    setSelectValue('#instance-name', row.instance_name);
+    await onInstanceChange(row.instance_name, { fromTree: true });
+    if (row.db_name && $('#db-name').querySelector(`option[value="${CSS.escape(row.db_name)}"]`)) {
+      setSelectValue('#db-name', row.db_name);
+      state.current.db = row.db_name;
+    }
+  }
+  editor.setValue(row.sqllog, true);
+  saveDraft();
+  if (run) runQuery();
+}
+
+async function loadHistory() {
+  const h = state.history;
+  await loadLogPage(h, $('#history-table'), $('#history-pager'), $('#history-summary'), { starMode: false });
+}
+async function loadFavorites() {
+  const f = state.favorites;
+  await loadLogPage(f, $('#fav-table'), $('#fav-pager'), $('#fav-summary'), { starMode: true });
+}
+
+async function loadLogPage(pageState, tableEl, pagerSel, summaryEl, { starMode }) {
+  const limit = 20;
+  summaryEl.textContent = '加载中…';
+  try {
+    const res = await state.api.queryLog({
+      limit,
+      offset: (pageState.page - 1) * limit,
+      search: pageState.search,
+      star: starMode ? 'true' : '',
+    });
+    renderLogTable(tableEl, res.rows || [], { starMode });
+    pageState.total = res.total || 0;
+    summaryEl.textContent = `共 ${pageState.total} 条`;
+    renderPager(pagerSel, pageState.page, Math.max(1, Math.ceil(pageState.total / limit)), (p) => {
+      pageState.page = p;
+      starMode ? loadFavorites() : loadHistory();
+    });
+  } catch (e) {
+    summaryEl.textContent = `加载失败：${e.message}`;
+    tableEl.innerHTML = '';
+  }
+}
+
+/* ======================= 本地 SQL 收藏（仅存本机，支持分组） ======================= */
+const localFav = {
+  items: [],
+  groups: [],
+  async load() {
+    const o = await chrome.storage.local.get({ 'local-sql': [], 'local-sql-groups': [] });
+    this.items = o['local-sql'];
+    this.groups = o['local-sql-groups'];
+  },
+  async persist() {
+    await chrome.storage.local.set({ 'local-sql': this.items, 'local-sql-groups': this.groups });
+  },
+};
+
+function fillLocalGroupFilter() {
+  const sel = $('#local-group-filter');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">全部分组</option><option value="__none">未分组</option>';
+  for (const g of localFav.groups) sel.appendChild(el(`<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`));
+  if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+}
+
+function switchFavTab(which) {
+  $('#favtab-cloud').classList.toggle('active', which === 'cloud');
+  $('#favtab-local').classList.toggle('active', which === 'local');
+  $('#fav-cloud').hidden = which !== 'cloud';
+  $('#fav-local').hidden = which !== 'local';
+  if (which === 'local') renderLocalList();
+}
+$('#favtab-cloud').addEventListener('click', () => switchFavTab('cloud'));
+$('#favtab-local').addEventListener('click', () => switchFavTab('local'));
+
+/** 保存弹窗：命名 + 选分组 / 新建分组 */
+function openLocalSaveModal({ sql, instance = '', db = '', onSaved } = {}) {
+  if (!sql?.trim()) return toast('没有可保存的 SQL', 'error');
+  const body = el(`<div>
+    <label class="setting-row"><span>名称</span><input id="lf-name" type="text" placeholder="例如：订单表慢查询" maxlength="60" /></label>
+    <label class="setting-row"><span>分组</span><select id="lf-group" class="select"></select></label>
+    <label class="setting-row"><span>新建分组（可选）</span><input id="lf-newgroup" type="text" placeholder="输入新分组名，留空则用上方分组" maxlength="30" /></label>
+    <div class="setting-actions"><button class="button primary" id="lf-save">${icon('check')}<span>保存到本地</span></button></div>
+  </div>`);
+  const groupSel = body.querySelector('#lf-group');
+  groupSel.innerHTML = '<option value="">未分组</option>' + localFav.groups.map((g) => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join('');
+  body.querySelector('#lf-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') body.querySelector('#lf-save').click(); });
+  body.querySelector('#lf-save').addEventListener('click', async () => {
+    const name = body.querySelector('#lf-name').value.trim();
+    if (!name) return toast('请填写名称', 'error');
+    const newGroup = body.querySelector('#lf-newgroup').value.trim();
+    let group = groupSel.value;
+    if (newGroup) {
+      group = newGroup;
+      if (!localFav.groups.includes(newGroup)) localFav.groups.push(newGroup);
+    }
+    localFav.items.unshift({ id: String(Date.now()), name, sql: sql.trim(), instance, db, group, createdAt: Date.now() });
+    await localFav.persist();
+    closeModal();
+    toast(`已保存「${name}」到本地`, 'success');
+    fillLocalGroupFilter();
+    renderLocalList();
+    onSaved?.();
+  });
+  openModal('保存 SQL 到本地', body);
+}
+
+$('#local-save-editor').addEventListener('click', () => {
+  openLocalSaveModal({ sql: editor.value, instance: $('#instance-name').value, db: $('#db-name').value });
+});
+
+/** 结果工具栏：保存当前结果对应的 SQL */
+$('#save-local').addEventListener('click', () => {
+  const r = state.results.find((x) => x.id === state.activeResult);
+  if (!r?.sql) return toast('当前没有可保存的查询结果', 'error');
+  const [instance = '', db = ''] = String(r.target || '').split('/');
+  openLocalSaveModal({ sql: r.sql, instance, db });
+});
+
+/** 一键回填并执行 */
+async function runLocalSql(item) {
+  switchView('query');
+  editor.setValue(item.sql);
+  const instSel = $('#instance-name');
+  if (item.instance && [...instSel.options].some((o) => o.value === item.instance)) {
+    if (instSel.value !== item.instance) {
+      setSelectValue(instSel, item.instance);
+      await onInstanceChange(item.instance);
+    }
+    if (item.db) {
+      const dbSel = $('#db-name');
+      if ([...dbSel.options].some((o) => o.value === item.db)) setSelectValue(dbSel, item.db);
+      else toast(`库 ${item.db} 在该实例下不可见，请手动选择`, 'info');
+    }
+  } else if (item.instance) {
+    toast(`实例 ${item.instance} 当前不可用，仅回填 SQL`, 'info');
+  }
+  runQuery();
+}
+
+function renderLocalList() {
+  const table = $('#local-table');
+  const filter = $('#local-group-filter').value;
+  const items = localFav.items
+    .filter((i) => (filter === '' ? true : filter === '__none' ? !i.group : i.group === filter))
+    .sort((a, b) => (a.group || '').localeCompare(b.group || '', 'zh-CN') || b.createdAt - a.createdAt);
+  table.innerHTML = '';
+  table.appendChild(el(`<thead><tr>
+    <th style="width:180px">名称</th><th>SQL</th><th style="width:100px">分组</th>
+    <th style="width:150px">实例 / 库</th><th style="width:90px">保存时间</th><th style="width:210px">操作</th>
+  </tr></thead>`));
+  const tbody = document.createElement('tbody');
+  for (const item of items) {
+    const tr = el(`<tr>
+      <td><b>${escapeHtml(item.name)}</b></td>
+      <td class="sql-cell clamp" title="点击展开/收起">${escapeHtml(item.sql)}</td>
+      <td>${item.group ? `<span class="tag green">${escapeHtml(item.group)}</span>` : '<span style="color:var(--text-3)">—</span>'}</td>
+      <td class="sql-cell" title="${escapeHtml(`${item.instance || '—'}/${item.db || '—'}`)}">${escapeHtml(item.instance || '—')}<br /><span style="color:var(--text-3)">${escapeHtml(item.db || '—')}</span></td>
+      <td>${new Date(item.createdAt).toLocaleDateString('zh-CN')}</td>
+      <td><div class="row-actions">
+        <button class="button small primary" data-act="run">${icon('play')}查询</button>
+        <button class="button small" data-act="edit">${icon('format')}编辑</button>
+        <button class="button small danger" data-act="del">${icon('trash')}删除</button>
+      </div></td>
+    </tr>`);
+    tr.querySelector('.clamp').addEventListener('click', () => tr.classList.toggle('sql-expanded'));
+    tr.querySelector('[data-act="run"]').addEventListener('click', () => runLocalSql(item));
+    tr.querySelector('[data-act="edit"]').addEventListener('click', () => openLocalEditModal(item));
+    tr.querySelector('[data-act="del"]').addEventListener('click', async () => {
+      localFav.items = localFav.items.filter((x) => x.id !== item.id);
+      await localFav.persist();
+      renderLocalList();
+      toast(`已删除「${item.name}」`, 'info');
+    });
+    tbody.appendChild(tr);
+  }
+  if (!items.length) tbody.appendChild(el(`<tr><td colspan="6" style="text-align:center;color:var(--text-3);padding:22px">暂无本地 SQL：查询后在结果工具栏点「存本地」，或点上方「保存编辑器 SQL」</td></tr>`));
+  table.appendChild(tbody);
+  $('#local-summary').textContent = `共 ${localFav.items.length} 条 · ${localFav.groups.length} 个分组`;
+}
+
+/** 编辑已保存条目：改名 / 换分组 / 改 SQL */
+function openLocalEditModal(item) {
+  const body = el(`<div>
+    <label class="setting-row"><span>名称</span><input id="lfe-name" type="text" maxlength="60" value="${escapeHtml(item.name)}" /></label>
+    <label class="setting-row"><span>分组</span><select id="lfe-group" class="select"></select></label>
+    <label class="setting-row"><span>新建分组（可选）</span><input id="lfe-newgroup" type="text" maxlength="30" placeholder="留空则用上方分组" /></label>
+    <label class="setting-row"><span>SQL</span><textarea id="lfe-sql" rows="6" style="font-family:var(--mono);font-size:12px"></textarea></label>
+    <div class="setting-actions"><button class="button primary" id="lfe-save">${icon('check')}<span>保存修改</span></button></div>
+  </div>`);
+  const groupSel = body.querySelector('#lfe-group');
+  groupSel.innerHTML = '<option value="">未分组</option>' + localFav.groups.map((g) => `<option value="${escapeHtml(g)}" ${g === item.group ? 'selected' : ''}>${escapeHtml(g)}</option>`).join('');
+  body.querySelector('#lfe-sql').value = item.sql;
+  body.querySelector('#lfe-save').addEventListener('click', async () => {
+    const name = body.querySelector('#lfe-name').value.trim();
+    const sql = body.querySelector('#lfe-sql').value.trim();
+    if (!name || !sql) return toast('名称和 SQL 不能为空', 'error');
+    const newGroup = body.querySelector('#lfe-newgroup').value.trim();
+    if (newGroup && !localFav.groups.includes(newGroup)) localFav.groups.push(newGroup);
+    Object.assign(item, { name, sql, group: newGroup || groupSel.value });
+    await localFav.persist();
+    closeModal();
+    fillLocalGroupFilter();
+    renderLocalList();
+    toast('修改已保存', 'success');
+  });
+  openModal(`编辑本地 SQL · ${item.name}`, body);
+}
+
+/** 分组管理：新建 / 删除（组内条目回到未分组） */
+$('#local-group-mgr').addEventListener('click', () => {
+  const body = el(`<div>
+    <div id="lgm-list" style="display:flex;flex-direction:column;gap:6px"></div>
+    <label class="setting-row" style="margin-top:10px"><span>新建分组</span>
+      <div style="display:flex;gap:8px">
+        <input id="lgm-name" type="text" maxlength="30" placeholder="分组名" />
+        <button class="button small" id="lgm-add">${icon('plus')}添加</button>
+      </div>
+    </label>
+  </div>`);
+  const list = body.querySelector('#lgm-list');
+  const refreshList = () => {
+    list.replaceChildren();
+    if (!localFav.groups.length) list.appendChild(el(`<div style="color:var(--text-3);font-size:12px;padding:6px 0">还没有分组，可在下方新建</div>`));
+    for (const g of localFav.groups) {
+      const n = localFav.items.filter((i) => i.group === g).length;
+      const row = el(`<div style="display:flex;align-items:center;gap:8px">
+        <span class="tag green">${escapeHtml(g)}</span>
+        <span style="color:var(--text-3);font-size:12px">${n} 条</span>
+        <button class="button small danger" style="margin-left:auto" ${n ? '' : ''}>${icon('trash')}删除</button>
+      </div>`);
+      row.querySelector('button').addEventListener('click', async () => {
+        localFav.groups = localFav.groups.filter((x) => x !== g);
+        localFav.items.forEach((i) => { if (i.group === g) i.group = ''; });
+        await localFav.persist();
+        fillLocalGroupFilter();
+        renderLocalList();
+        refreshList();
+        toast(`分组「${g}」已删除，组内条目移入未分组`, 'info');
+      });
+      list.appendChild(row);
+    }
+  };
+  refreshList();
+  body.querySelector('#lgm-add').addEventListener('click', async () => {
+    const name = body.querySelector('#lgm-name').value.trim();
+    if (!name) return toast('请输入分组名', 'error');
+    if (localFav.groups.includes(name)) return toast('分组已存在', 'error');
+    localFav.groups.push(name);
+    await localFav.persist();
+    body.querySelector('#lgm-name').value = '';
+    fillLocalGroupFilter();
+    renderLocalList();
+    refreshList();
+  });
+  openModal('管理本地分组', body);
+});
+
+$('#local-group-filter').addEventListener('change', renderLocalList);
+localFav.load().then(() => { fillLocalGroupFilter(); });
+
+/** 导出全部本地 SQL 为 JSON（换机迁移用） */
+$('#local-export').addEventListener('click', () => {
+  if (!localFav.items.length) return toast('没有可导出的本地 SQL', 'error');
+  const payload = { version: 1, exportedAt: new Date().toISOString(), groups: localFav.groups, items: localFav.items };
+  download(`本地SQL收藏-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(payload, null, 2), 'application/json');
+  toast(`已导出 ${localFav.items.length} 条本地 SQL`, 'success');
+});
+
+/** 导入 JSON：按 名称+SQL+分组 去重合并，分组并入 */
+$('#local-import').addEventListener('click', () => $('#local-import-file').click());
+$('#local-import-file').addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    const items = Array.isArray(data) ? data : data.items;
+    if (!Array.isArray(items) || !items.length) throw new Error('文件里没有可导入的条目');
+    const key = (i) => `${i.name}||${i.sql}||${i.group || ''}`;
+    const existing = new Set(localFav.items.map(key));
+    let added = 0;
+    for (const it of items) {
+      if (!it?.name || !it?.sql || existing.has(key(it))) continue;
+      existing.add(key(it));
+      localFav.items.push({
+        id: String(Date.now()) + added,
+        name: String(it.name), sql: String(it.sql),
+        instance: it.instance || '', db: it.db || '',
+        group: it.group || '', createdAt: it.createdAt || Date.now(),
+      });
+      added += 1;
+    }
+    for (const g of data.groups || []) if (g && !localFav.groups.includes(g)) localFav.groups.push(String(g));
+    await localFav.persist();
+    fillLocalGroupFilter();
+    renderLocalList();
+    toast(`导入完成：新增 ${added} 条，跳过重复 ${items.length - added} 条`, added || items.length ? 'success' : 'info');
+  } catch (err) {
+    toast(`导入失败：${err.message}`, 'error');
+  }
+});
+
+function renderPager(container, page, pages, go) {
+  container.replaceChildren();
+  const mk = (text, target, disabled, current = false) => {
+    const b = document.createElement('button');
+    b.textContent = text;
+    b.disabled = disabled;
+    if (current) b.classList.add('current');
+    if (!disabled && !current) b.addEventListener('click', () => go(target));
+    container.appendChild(b);
+  };
+  mk('‹', page - 1, page <= 1);
+  const start = Math.max(1, page - 2);
+  const end = Math.min(pages, start + 4);
+  for (let i = start; i <= end; i++) mk(String(i), i, false, i === page);
+  mk('›', page + 1, page >= pages);
+}
+
+let searchTimers = {};
+function bindSearch(inputSel, pageState, reload) {
+  $(inputSel).addEventListener('input', (e) => {
+    clearTimeout(searchTimers[inputSel]);
+    searchTimers[inputSel] = setTimeout(() => {
+      pageState.search = e.target.value.trim();
+      pageState.page = 1;
+      reload();
+    }, 350);
+  });
+}
+bindSearch('#history-search', state.history, loadHistory);
+bindSearch('#fav-search', state.favorites, loadFavorites);
+$('#history-refresh').addEventListener('click', loadHistory);
+$('#fav-refresh').addEventListener('click', loadFavorites);
+
+/* ======================= SQL 审核检测 ======================= */
+$('#audit-instance').addEventListener('change', async (e) => {
+  const dbSel = $('#audit-db');
+  dbSel.innerHTML = '<option value="">选择库</option>';
+  dbSel.disabled = true;
+  if (!e.target.value) return;
+  try {
+    const res = await state.api.databases(e.target.value);
+    if (res.status !== 0) throw new Error(res.msg);
+    dbSel.innerHTML =
+      '<option value="">选择库</option>' +
+      (res.data || []).map((d) => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('');
+    dbSel.disabled = false;
+  } catch (e2) {
+    toast(`获取库列表失败：${e2.message}`, 'error');
+  }
+});
+
+const ERRLEVEL_TAG = { 0: ['pass', '通过'], 1: ['yellow', '警告'], 2: ['red', '错误'] };
+const STAGE_ZH = {
+  CHECKED: '已审核', EXECUTED: '已执行', FINISHED: '已完成',
+  'Execute Successfully': '执行成功', 'Audit Completed': '审核完成',
+};
+
+$('#audit-run').addEventListener('click', async () => {
+  const instance = $('#audit-instance').value;
+  const db = $('#audit-db').value;
+  const sql = auditEditor.value;
+  if (!instance) return toast('请选择实例', 'error');
+  if (!db) return toast('请选择数据库', 'error');
+  if (!sql.trim()) return toast('请输入待检测的 SQL', 'error');
+  const opt = $('#audit-instance').selectedOptions[0];
+  const instanceId = opt?.dataset?.id;
+  if (!instanceId) return toast('找不到实例 ID', 'error');
+
+  const btn = $('#audit-run');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span><span>检测中…</span>';
+  try {
+    const res = await state.api.sqlCheck({ fullSql: sql, instanceId: Number(instanceId), dbName: db });
+    const rows = res.rows || [];
+    const summary = $('#audit-summary');
+    summary.hidden = false;
+    summary.replaceChildren(
+      el(`<span class="stat pass"><b>${rows.filter((r) => r.errlevel === 0).length}</b> 通过</span>`),
+      el(`<span class="stat warn"><b>${rows.filter((r) => r.errlevel === 1).length}</b> 警告</span>`),
+      el(`<span class="stat err"><b>${rows.filter((r) => r.errlevel === 2).length}</b> 错误</span>`),
+      el(`<span class="stat syntax">类型：${res.syntax_type === 1 ? 'DDL' : res.syntax_type === 2 ? 'DML' : '其他'}</span>`)
+    );
+    const table = $('#audit-table');
+    table.innerHTML = '';
+    table.appendChild(el(`<thead><tr><th style="width:44px">#</th><th>SQL 语句</th>
+      <th style="width:90px" class="num">影响行数</th><th style="width:70px">级别</th><th>审核信息</th></tr></thead>`));
+    const tbody = document.createElement('tbody');
+    for (const r of rows) {
+      const [cls, text] = ERRLEVEL_TAG[r.errlevel] || ['gray', '未知'];
+      tbody.appendChild(el(`<tr>
+        <td class="num">${r.id}</td>
+        <td class="sql-cell">${escapeHtml(r.sql)}</td>
+        <td class="num">${escapeHtml(String(r.affected_rows ?? ''))}</td>
+        <td><span class="tag ${cls}">${text}</span></td>
+        <td class="sql-cell">${escapeHtml(r.errormessage || (r.stagestatus ? STAGE_ZH[r.stagestatus] || r.stagestatus : '—'))}</td>
+      </tr>`));
+    }
+    table.appendChild(tbody);
+    toast(`检测完成：${res.error_count} 错误 / ${res.warning_count} 警告`, res.error_count > 0 ? 'error' : 'success');
+    // 无错误时展示提单面板
+    const panel = $('#submit-panel');
+    if ((res.error_count ?? 0) === 0) {
+      panel.hidden = false;
+      try {
+        const ctx = await state.api.submitContext();
+        $('#wf-group').innerHTML =
+          '<option value="">选择组</option>' +
+          ctx.groups
+            .map((g) => `<option value="${escapeHtml(g.groupId)}">${escapeHtml(g.groupName)}</option>`)
+            .join('');
+      } catch (e2) {
+        toast(`获取资源组失败：${e2.message}`, 'error');
+      }
+    } else {
+      panel.hidden = true;
+    }
+  } catch (e) {
+    toast(`检测失败：${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `${icon('shield')}<span>开始检测</span>`;
+    mountIcons(btn);
+  }
+});
+
+
+
+/* ======================= 表结构对比 ======================= */
+async function bindDiffInstance(instSel, dbSel) {
+  $(dbSel).innerHTML = '<option value="">选择库</option>';
+  $(dbSel).disabled = true;
+  const name = $(instSel).value;
+  if (!name) return;
+  try {
+    const res = await state.api.databases(name);
+    if (res.status !== 0) throw new Error(res.msg);
+    $(dbSel).innerHTML =
+      '<option value="">选择库</option>' +
+      (res.data || []).map((d) => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('');
+    $(dbSel).disabled = false;
+  } catch (e) {
+    toast(`获取库列表失败：${e.message}`, 'error');
+  }
+}
+$('#diff-instance-a').addEventListener('change', () => bindDiffInstance('#diff-instance-a', '#diff-db-a'));
+$('#diff-instance-b').addEventListener('change', () => bindDiffInstance('#diff-instance-b', '#diff-db-b'));
+async function loadDiffTableOptions(instanceSel, dbSel, tableSel) {
+  const tSel = $(tableSel);
+  const prev = tSel.value;
+  tSel.innerHTML = '<option value="">选择表</option>';
+  const instance = $(instanceSel).value;
+  const db = $(dbSel).value;
+  if (!instance || !db) return;
+  try {
+    const res = await state.api.tables(instance, db);
+    if (res.status !== 0) return;
+    const opts = (res.data || []).map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
+    tSel.innerHTML = '<option value="">选择表</option>' + opts;
+    // 恢复之前选择或默认同名表
+    if (prev && tSel.querySelector(`option[value="${CSS.escape(prev)}"]`)) setSelectValue(tSel, prev);
+  } catch { /* 静默 */ }
+}
+$('#diff-db-a').addEventListener('change', () => loadDiffTableOptions('#diff-instance-a', '#diff-db-a', '#diff-table-a'));
+$('#diff-db-b').addEventListener('change', () => {
+  loadDiffTableOptions('#diff-instance-b', '#diff-db-b', '#diff-table-b');
+  // B 侧默认同名表
+  const ta = $('#diff-table-a').value;
+  setTimeout(() => {
+    setSelectValue('#diff-table-b', ta);
+  }, 800);
+});
+$('#diff-table-a').addEventListener('change', () => {
+  const ta = $('#diff-table-a').value;
+  setSelectValue('#diff-table-b', ta);
+});
+
+/** 建表语句归一化：去除 AUTO_INCREMENT=N、多余空白，便于比对 */
+function normalizeCreate(sql) {
+  return String(sql || '')
+    .replace(/AUTO_INCREMENT=\d+/gi, '')
+    .replace(/DEFAULT\s+CHARSET=\w+/gi, '')
+    .replace(/COLLATE=\w+/gi, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*/g, '\n')
+    .trim();
+}
+
+async function getCreateNormalized(instance, db, table) {
+  try {
+    const res = await state.api.describe(instance, db, table);
+    if (res.status !== 0) return null;
+    const raw = res.data?.rows?.[0]?.[1] || '';
+    return { raw: raw.trim(), norm: normalizeCreate(raw) };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchDiffSides() {
+  const ia = $('#diff-instance-a').value;
+  const da = $('#diff-db-a').value;
+  const ib = $('#diff-instance-b').value;
+  const dbb = $('#diff-db-b').value;
+  if (!ia || !da || !ib || !dbb) {
+    toast('请先选择两侧的实例与库', 'error');
+    return null;
+  }
+  const [ra, rb] = await Promise.all([state.api.tables(ia, da), state.api.tables(ib, dbb)]);
+  if (ra.status !== 0 || rb.status !== 0) throw new Error(ra.msg || rb.msg || '读取表清单失败');
+  return { ia, da, ib, db: dbb, listA: ra.data || [], listB: rb.data || [] };
+}
+
+/** 整库：仅对比表清单（2 个请求，不扫结构） */
+async function runDiffList() {
+  const btn = $('#diff-run');
+  btn.disabled = true;
+  $('#diff-table').innerHTML = '';
+  $('#diff-summary').hidden = true;
+  try {
+    const s = await fetchDiffSides();
+    if (!s) return;
+    const setB = new Set(s.listB);
+    const setA = new Set(s.listA);
+    const rows = [];
+    for (const t of s.listA) if (!setB.has(t)) rows.push({ table: t, status: 'only-a', a: '', b: '' });
+    for (const t of s.listB) if (!setA.has(t)) rows.push({ table: t, status: 'only-b', a: '', b: '' });
+    for (const t of s.listA) if (setB.has(t)) rows.push({ table: t, status: 'both', a: '', b: '' });
+    rows.sort((x, y) => {
+      const order = { 'only-a': 0, 'only-b': 1, both: 2, diff: 3, same: 4 };
+      return order[x.status] - order[y.status] || x.table.localeCompare(y.table);
+    });
+    renderDiffTable(rows, s);
+    const sum = $('#diff-summary');
+    sum.hidden = false;
+    const onlyA = rows.filter((r2) => r2.status === 'only-a').length;
+    const onlyB = rows.filter((r2) => r2.status === 'only-b').length;
+    const both = rows.filter((r2) => r2.status === 'both').length;
+    sum.replaceChildren(
+      el(`<span class="stat err"><b>${onlyA}</b> 仅 A 有</span>`),
+      el(`<span class="stat"><b>${onlyB}</b> 仅 B 有</span>`),
+      el(`<span class="stat warn"><b>${both}</b> 同名表（结构未比对）</span>`),
+      el(`<span class="stat syntax">${escapeHtml(s.ia)}/${escapeHtml(s.da)} ↔ ${escapeHtml(s.ib)}/${escapeHtml(s.db)}</span>`)
+    );
+    toast(`清单对比完成：仅A ${onlyA} · 仅B ${onlyB} · 同名 ${both}`, 'success');
+  } catch (e) {
+    toast(`对比失败：${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+$('#diff-run').addEventListener('click', runDiffList);
+
+/** 整库：深度对比全部同名表（逐表请求，用户显式触发） */
+async function runDiffDeep() {
+  const btn = $('#diff-deep');
+  btn.disabled = true;
+  $('#diff-progress').hidden = false;
+  try {
+    const s = await fetchDiffSides();
+    if (!s) return;
+    const both = s.listA.filter((t) => new Set(s.listB).has(t));
+    const rows = [];
+    for (const t of s.listA) if (!new Set(s.listB).has(t)) rows.push({ table: t, status: 'only-a', a: '', b: '' });
+    for (const t of s.listB) if (!new Set(s.listA).has(t)) rows.push({ table: t, status: 'only-b', a: '', b: '' });
+    let done = 0, diffCount = 0, sameCount = 0;
+    for (const t of both) {
+      done += 1;
+      $('#diff-progress-text').textContent = `深度对比 ${done}/${both.length}：${t}`;
+      const [ca, cb] = await Promise.all([
+        getCreateNormalized(s.ia, s.da, t),
+        getCreateNormalized(s.ib, s.db, t),
+      ]);
+      const same = ca && cb && ca.norm === cb.norm;
+      if (same) sameCount += 1; else diffCount += 1;
+      rows.push({ table: t, status: same ? 'same' : 'diff', a: ca?.raw || '', b: cb?.raw || '' });
+      if (done % 10 === 0) {
+        rows.sort((x, y) => {
+          const order = { 'only-a': 0, 'only-b': 1, both: 2, diff: 3, same: 4 };
+          return order[x.status] - order[y.status] || x.table.localeCompare(y.table);
+        });
+        renderDiffTable(rows, s);
+        await new Promise((r2) => setTimeout(r2, 20));
+      }
+    }
+    rows.sort((x, y) => {
+      const order = { 'only-a': 0, 'only-b': 1, both: 2, diff: 3, same: 4 };
+      return order[x.status] - order[y.status] || x.table.localeCompare(y.table);
+    });
+    renderDiffTable(rows, s);
+    const sum = $('#diff-summary');
+    sum.hidden = false;
+    const onlyA = rows.filter((r2) => r2.status === 'only-a').length;
+    const onlyB = rows.filter((r2) => r2.status === 'only-b').length;
+    sum.replaceChildren(
+      el(`<span class="stat err"><b>${onlyA + onlyB}</b> 仅单侧存在</span>`),
+      el(`<span class="stat warn"><b>${diffCount}</b> 结构不同</span>`),
+      el(`<span class="stat pass"><b>${sameCount}</b> 结构一致</span>`),
+      el(`<span class="stat syntax">${escapeHtml(s.ia)}/${escapeHtml(s.da)} ↔ ${escapeHtml(s.ib)}/${escapeHtml(s.db)}</span>`)
+    );
+    toast(`深度对比完成：单侧 ${onlyA + onlyB} · 差异 ${diffCount} · 一致 ${sameCount}`, 'success');
+  } catch (e) {
+    toast(`深度对比失败：${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    $('#diff-progress').hidden = true;
+  }
+}
+$('#diff-deep').addEventListener('click', runDiffDeep);
+
+const DIFF_STATUS = {
+  'only-a': ['red', '仅 A 有'],
+  'only-b': ['blue', '仅 B 有'],
+  both: ['gray', '同名（未比对）'],
+  diff: ['yellow', '结构不同'],
+  same: ['green', '一致'],
+};
+
+function renderDiffTable(rows, env) {
+  const table = $('#diff-table');
+  table.innerHTML = '';
+  table.appendChild(el(`<thead><tr>
+    <th>表名</th><th style="width:110px">状态</th>
+    <th>A 端建表（${escapeHtml(env.ia)}/${escapeHtml(env.da)}）</th>
+    <th>B 端建表（${escapeHtml(env.ib)}/${escapeHtml(env.db)}）</th>
+    <th style="width:80px">操作</th>
+  </tr></thead>`));
+  const tbody = document.createElement('tbody');
+  for (const row of rows) {
+    const [cls, text] = DIFF_STATUS[row.status];
+    const tr = el(`<tr>
+      <td class="sql-cell">${escapeHtml(row.table)}</td>
+      <td><span class="tag ${cls}">${text}</span></td>
+      <td class="diff-cell-sql">${escapeHtml(row.a ? row.a.slice(0, 300) : '—')}</td>
+      <td class="diff-cell-sql">${escapeHtml(row.b ? row.b.slice(0, 300) : '—')}</td>
+      <td>${row.status === 'diff' ? `<button class="button small" data-act="detail">Diff</button>` : ''}</td>
+    </tr>`);
+    const detailBtn = tr.querySelector('[data-act="detail"]');
+    if (detailBtn) {
+      detailBtn.addEventListener('click', () => {
+        showSideBySide(row.table, row.table, row.a, row.b, `${env.ia}/${env.da}`, `${env.ib}/${env.db}`);
+      });
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+}
+/* ======================= 容量与事务诊断 ======================= */
+function fmtSize(kb) {
+  const n = Number(kb) || 0;
+  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(2) + ' GB';
+  if (n >= 1024) return (n / 1024).toFixed(2) + ' MB';
+  return n.toFixed(0) + ' KB';
+}
+function fmtNum(n) {
+  return Number(n ?? 0).toLocaleString('zh-CN');
+}
+
+async function runDiag({ trxOnly = false } = {}) {
+  const instance = $('#diag-instance').value;
+  if (!instance) return toast('请选择实例', 'error');
+  const btn = $('#diag-run');
+  btn.disabled = !trxOnly;
+  try {
+    if (!trxOnly) {
+      const res = await state.api.tablespace(instance);
+      if (res.status !== 0) throw new Error(res.msg || '获取表空间失败（可能需要更高权限）');
+      const rows = (res.rows || []).map((r2) => ({
+        ...r2,
+        total: Number(r2.total_size) || 0,
+        rowsN: Number(r2.table_rows) || 0,
+        data: Number(r2.data_size) || 0,
+        index: Number(r2.index_size) || 0,
+      }));
+      rows.sort((a, b) => b.total - a.total);
+      const totalSize = rows.reduce((s, r2) => s + r2.total, 0);
+      const totalRows = rows.reduce((s, r2) => s + r2.rowsN, 0);
+      const byDb = new Map();
+      for (const r2 of rows) byDb.set(r2.table_schema, (byDb.get(r2.table_schema) || 0) + r2.total);
+      const topDb = [...byDb.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+      const sum = $('#diag-summary');
+      sum.hidden = false;
+      sum.replaceChildren(
+        el(`<span class="stat pass"><b>${fmtSize(totalSize)}</b> 总大小</span>`),
+        el(`<span class="stat warn"><b>${fmtNum(totalRows)}</b> 总行数</span>`),
+        el(`<span class="stat"><b>${rows.length}</b> 张表</span>`),
+        el(
+          `<span class="stat syntax">Top 库：${topDb.map(([d, s]) => `${escapeHtml(d)} ${fmtSize(s)}`).join(' · ')}</span>`
+        )
+      );
+      const table = $('#space-table');
+      table.innerHTML = '';
+      table.appendChild(el(`<thead><tr><th>库</th><th>表</th><th>引擎</th>
+        <th class="num">总大小</th><th class="num">行数</th><th class="num">数据</th><th class="num">索引</th></tr></thead>`));
+      const tbody = document.createElement('tbody');
+      for (const r2 of rows.slice(0, 300)) {
+        tbody.appendChild(el(`<tr>
+          <td>${escapeHtml(r2.table_schema)}</td>
+          <td class="sql-cell">${escapeHtml(r2.table_name)}</td>
+          <td>${escapeHtml(r2.engine || '')}</td>
+          <td class="num"><b>${fmtSize(r2.total)}</b></td>
+          <td class="num">${fmtNum(r2.rowsN)}</td>
+          <td class="num">${fmtSize(r2.data)}</td>
+          <td class="num">${fmtSize(r2.index)}</td>
+        </tr>`));
+      }
+      table.appendChild(tbody);
+    }
+    await renderTrx(instance);
+  } catch (e) {
+    toast(`诊断失败：${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function renderTrx(instance) {
+  const table = $('#trx-table');
+  try {
+    const res = await state.api.innodbTrx(instance);
+    const rows = res.rows || [];
+    table.innerHTML = '';
+    table.appendChild(el(`<thead><tr><th style="width:170px">开始时间</th><th style="width:90px">状态</th>
+      <th class="num" style="width:80px">锁定行</th><th>当前 SQL</th></tr></thead>`));
+    const tbody = document.createElement('tbody');
+    const now = Date.now();
+    for (const t of rows) {
+      const startedMs = t.trx_started ? new Date(String(t.trx_started).replace(' ', 'T') + 'Z').getTime() : NaN;
+      const ageSec = isNaN(startedMs) ? null : Math.round((now - startedMs) / 1000);
+      const long = ageSec !== null && ageSec > 60;
+      tbody.appendChild(el(`<tr>
+        <td>${escapeHtml(String(t.trx_started || ''))}${ageSec !== null ? ` <span class="tag ${long ? 'red' : 'gray'}">${ageSec}s</span>` : ''}</td>
+        <td>${escapeHtml(String(t.trx_state || ''))}</td>
+        <td class="num">${fmtNum(t.trx_rows_locked)}</td>
+        <td class="sql-cell">${escapeHtml(String(t.trx_query || '').slice(0, 200))}</td>
+      </tr>`));
+    }
+    table.appendChild(tbody);
+    if (!rows.length) {
+      table.appendChild(el(`<tbody><tr><td colspan="4" style="text-align:center;color:var(--text-3);padding:18px">当前没有活跃 InnoDB 事务</td></tr></tbody>`));
+    }
+  } catch (e) {
+    table.innerHTML = '';
+    table.appendChild(el(`<tbody><tr><td style="color:var(--danger);padding:12px">事务查询失败：${escapeHtml(e.message)}</td></tr></tbody>`));
+  }
+}
+
+$('#diag-run').addEventListener('click', () => runDiag());
+$('#diag-refresh-trx').addEventListener('click', () => runDiag({ trxOnly: true }));
+
+/* ---------- 单表字段级对比 ---------- */
+
+/** 解析建表语句 → 字段定义表 Map<字段名, 定义行(不含首尾逗号)> */
+function parseCreateColumns(createSql) {
+  const cols = new Map();
+  const body = String(createSql || '').replace(/\r/g, '');
+  for (const rawLine of body.split('\n')) {
+    const line = rawLine.trim().replace(/,$/, '');
+    if (!line || /^CREATE TABLE/i.test(line) || /^\)/.test(line) || /^ENGINE/i.test(line) || /^DEFAULT/i.test(line) || /^COLLATE/i.test(line) || /^COMMENT=/i.test(line) || /^AUTO_INCREMENT/i.test(line) || /^ROW_FORMAT/i.test(line)) continue;
+    const m = line.match(/^`?(\w+)`?\s+(.+)$/);
+    if (!m) continue;
+    const kw = m[1].toUpperCase();
+    if (['PRIMARY', 'UNIQUE', 'KEY', 'INDEX', 'CONSTRAINT', 'FOREIGN', 'FULLTEXT', 'SPATIAL'].includes(kw)) continue;
+    cols.set(m[1], m[2].trim());
+  }
+  return cols;
+}
+
+async function runTableDiff() {
+  const ia = $('#diff-instance-a').value;
+  const da = $('#diff-db-a').value;
+  const ib = $('#diff-instance-b').value;
+  const dbb = $('#diff-db-b').value;
+  const ta = $('#diff-table-a').value;
+  let tb = $('#diff-table-b').value;
+  if (!ia || !da || !ib || !dbb) return toast('请先选择两侧的实例与库', 'error');
+  if (!ta) return toast('请选择表 A', 'error');
+  if (!tb) tb = ta; // 默认同名表
+  const btn = $('#diff-table-run');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span><span>对比中…</span>';
+  try {
+    const [ca, cb] = await Promise.all([
+      getCreateNormalized(ia, da, ta),
+      getCreateNormalized(ib, dbb, tb),
+    ]);
+    if (!ca || !cb) throw new Error('任一侧建表语句获取失败（表不存在或无权限）');
+    const rows = computeFieldDiff(ca.raw, cb.raw).map((r2) => ({ ...r2, status: r2.tag[1] }));
+    const diffCount = rows.filter((r2) => r2.status !== 'same').length;
+
+    const wrap = $('#diff-field-wrap');
+    const table = $('#diff-field-table');
+    wrap.hidden = false;
+    table.innerHTML = '';
+    table.appendChild(el(`<thead><tr><th>字段</th><th style="width:76px">状态</th>
+      <th>A：${escapeHtml(ia)}/${escapeHtml(da)}.${escapeHtml(ta)}</th>
+      <th>B：${escapeHtml(ib)}/${escapeHtml(dbb)}.${escapeHtml(tb)}</th></tr></thead>`));
+    const tbody = document.createElement('tbody');
+    for (const row of rows) {
+      const tr = el(`<tr>
+        <td class="sql-cell"><b>${escapeHtml(row.name)}</b></td>
+        <td><span class="tag ${row.tag[0]}">${row.tag[1]}</span></td>
+        <td class="sql-cell" style="${row.status === 'only-b' ? 'color:var(--text-3)' : ''}">${escapeHtml(row.a ?? '—')}</td>
+        <td class="sql-cell" style="${row.status === 'only-a' ? 'color:var(--text-3)' : ''}">${escapeHtml(row.b ?? '—')}</td>
+      </tr>`);
+      tbody.appendChild(tr);
+    }
+    if (!rows.length) tbody.appendChild(el(`<tr><td colspan="4" style="text-align:center;color:var(--text-3);padding:14px">两侧均未解析出字段</td></tr>`));
+    table.appendChild(tbody);
+    // 底部附建表语句对比入口
+    const foot = el(`<tr><td colspan="4" style="text-align:center;padding:8px"><button class="button small" id="diff-open-side">${icon('eye')} 查看完整建表语句</button></td></tr>`);
+    tbody.appendChild(foot);
+    tbody.querySelector('#diff-open-side').addEventListener('click', () => showSideBySide(ta, tb, ca.raw, cb.raw, `${ia}/${da}`, `${ib}/${dbb}`));
+    toast(diffCount ? `字段级差异 ${diffCount} 项（共 ${rows.length} 字段）` : '两张表字段完全一致', diffCount ? 'info' : 'success');
+  } catch (e) {
+    toast(`单表对比失败：${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `${icon('table')}<span>对比选中表（字段级）</span>`;
+    mountIcons(btn);
+  }
+}
+$('#diff-table-run').addEventListener('click', runTableDiff);
+
+/** 字段级差异计算（弹窗与单表对比共用） */
+function computeFieldDiff(sqlA, sqlB) {
+  const colsA = parseCreateColumns(sqlA);
+  const colsB = parseCreateColumns(sqlB);
+  const all = [...new Set([...colsA.keys(), ...colsB.keys()])].sort();
+  return all.map((name) => {
+    const a = colsA.get(name);
+    const b = colsB.get(name);
+    let tag;
+    if (a && !b) tag = ['red', '仅 A 有'];
+    else if (!a && b) tag = ['blue', '仅 B 有'];
+    else if (a !== b) tag = ['yellow', '定义不同'];
+    else tag = ['green', '一致'];
+    return { name, a, b, tag };
+  });
+}
+
+/** 行级对齐：公共行对齐（LCS），同名首 token 的差异行（如同字段不同定义）也配成对 */
+function diffAlignLines(a, b) {
+  const ka = a.map((l) => l.trim());
+  const kb = b.map((l) => l.trim());
+  const n = ka.length, m = kb.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = ka[i] === kb[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (ka[i] === kb[j]) { out.push({ a: i, b: j }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ a: i, b: null }); i++; }
+    else { out.push({ a: null, b: j }); j++; }
+  }
+  while (i < n) out.push({ a: i++, b: null });
+  while (j < m) out.push({ a: null, b: j++ });
+  // 二次配对：仅 A 行与仅 B 行首 token 相同（如 `name` 字段定义不同）→ 合并为同行差异
+  const firstToken = (line) => line.trim().match(/^`([^`]+)`/)?.[1] || null;
+  const bUsed = new Set();
+  const matchOf = new Map();
+  for (const p of out) {
+    if (p.a === null || p.b !== null) continue;
+    const key = firstToken(a[p.a]);
+    if (!key) continue;
+    const hit = out.find((q) => q.a === null && q.b !== null && !bUsed.has(q.b) && firstToken(b[q.b]) === key);
+    if (hit) {
+      bUsed.add(hit.b);
+      matchOf.set(p.a, hit.b);
+    }
+  }
+  if (!matchOf.size) return out;
+  return out
+    .filter((p) => !(p.a === null && bUsed.has(p.b)))
+    .map((p) => (p.b === null && matchOf.has(p.a) ? { a: p.a, b: matchOf.get(p.a) } : p));
+}
+
+/** 对比弹窗：建表语句（单一行对齐视图）⇄ 字段表格，一键切换 */
+function showSideBySide(nameA, nameB, sqlA, sqlB, envA, envB) {
+  const body = document.createElement('div');
+  // 切换按钮组
+  const switcher = document.createElement('div');
+  switcher.className = 'setting-actions';
+  switcher.style.justifyContent = 'flex-start';
+  const mkBtn = (label) => el(`<button class="button small">${label}</button>`);
+  const btnSql = mkBtn('建表语句对比');
+  const btnGrid = mkBtn('字段表格对比');
+  btnSql.classList.add('primary');
+  const sqlView = document.createElement('div');
+  const gridView = document.createElement('div');
+  gridView.hidden = true;
+
+  const renderSql = () => {
+    sqlView.replaceChildren();
+    const la = String(sqlA || '').replace(/\r/g, '').split('\n');
+    const lb = String(sqlB || '').replace(/\r/g, '').split('\n');
+    const head = el(`<div class="du-head"><span>A · ${escapeHtml(nameA)}（${escapeHtml(envA)}，<i class="lg-a">红=仅A有</i> <i class="lg-c">黄=定义不同</i>）</span><span>B · ${escapeHtml(nameB)}（${escapeHtml(envB)}，<i class="lg-b">蓝=仅B有</i>）</span></div>`);
+    const grid = el('<div class="du-grid"></div>');
+    for (const p of diffAlignLines(la, lb)) {
+      const changed = p.a !== null && p.b !== null && la[p.a].trim() !== lb[p.b].trim();
+      const ca = el(`<div class="du-cell${p.a === null ? ' du-empty' : p.b === null ? ' du-only-a' : changed ? ' du-changed' : ''}">${p.a === null ? '' : escapeHtml(la[p.a])}</div>`);
+      const cb = el(`<div class="du-cell${p.b === null ? ' du-empty' : p.a === null ? ' du-only-b' : changed ? ' du-changed' : ''}">${p.b === null ? '' : escapeHtml(lb[p.b])}</div>`);
+      grid.append(ca, cb);
+    }
+    sqlView.append(head, grid);
+  };
+  const renderGrid = () => {
+    gridView.replaceChildren();
+    const rows = computeFieldDiff(sqlA, sqlB);
+    const t = document.createElement('table');
+    t.className = 'data-table';
+    t.innerHTML =
+      `<thead><tr><th>字段</th><th style="width:80px">状态</th><th>A：${escapeHtml(nameA)}</th><th>B：${escapeHtml(nameB)}</th></tr></thead>` +
+      `<tbody>${rows
+        .map(
+          (r2) => `<tr><td class="sql-cell"><b>${escapeHtml(r2.name)}</b></td>
+          <td><span class="tag ${r2.tag[0]}">${r2.tag[1]}</span></td>
+          <td class="sql-cell">${escapeHtml(r2.a ?? '—')}</td>
+          <td class="sql-cell">${escapeHtml(r2.b ?? '—')}</td></tr>`
+        )
+        .join('')}</tbody>`;
+    gridView.appendChild(t);
+  };
+  renderSql();
+  renderGrid();
+  const activate = (which) => {
+    const sqlMode = which === 'sql';
+    sqlView.hidden = !sqlMode;
+    gridView.hidden = sqlMode;
+    btnSql.classList.toggle('primary', sqlMode);
+    btnGrid.classList.toggle('primary', !sqlMode);
+  };
+  btnSql.addEventListener('click', () => activate('sql'));
+  btnGrid.addEventListener('click', () => activate('grid'));
+  switcher.append(btnSql, btnGrid);
+  body.append(switcher, sqlView, gridView);
+  openModal(`对比 · ${nameA} ↔ ${nameB}`, body, { wide: true });
+}
+
+
+/* ======================= 提交上线工单 ======================= */
+$('#wf-submit-btn').addEventListener('click', async () => {
+  const btn = $('#wf-submit-btn');
+  const instance = $('#audit-instance').value;
+  const db = $('#audit-db').value;
+  const workflowName = $('#wf-name').value.trim();
+  const groupId = $('#wf-group').value;
+  if (!workflowName) return toast('请填写工单名称', 'error');
+  if (!groupId) return toast('请选择资源组', 'error');
+  const opt = $(`#audit-instance option[value="${CSS.escape(instance)}"]`);
+  const instanceId = opt?.dataset?.id;
+  if (!instanceId) return toast('找不到实例 ID', 'error');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span><span>提交中…</span>';
+  try {
+    await state.api.submitWorkflow({
+      sqlContent: auditEditor.value,
+      groupId,
+      instanceId,
+      dbName: db,
+      workflowName,
+      isBackup: $('#wf-backup').value === 'true',
+    });
+    toast('工单已提交，等待审核', 'success');
+    $('#submit-panel').hidden = true;
+    switchView('workflow');
+    state.workflow.page = 1;
+    loadWorkflows();
+  } catch (e) {
+    // DRF 校验错误：{errors: ...} 已在 message 中
+    toast(`提交失败：${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = `${icon('arrow')}<span>提交工单</span>`;
+    mountIcons(btn);
+  }
+});
+
+/* ======================= 上线工单 ======================= */
+const WF_STATUS = {
+  workflow_finish: ['green', '已正常结束'],
+  workflow_executing: ['blue', '执行中'],
+  workflow_queuing: ['blue', '排队中'],
+  workflow_timing_task: ['teal', '定时执行'],
+  workflow_manreviewing: ['yellow', '等待审核人审核'],
+  workflow_review_pass: ['teal', '审核通过'],
+  workflow_abort: ['gray', '人工终止流程'],
+  workflow_autoreviewwrong: ['red', '自动审核不通过'],
+  workflow_exception: ['red', '执行有异常'],
+};
+const SYNTAX_NAME = { 0: '其他', 1: 'DDL', 2: 'DML', 3: 'DQL' };
+
+async function loadWorkflows() {
+  const w = state.workflow;
+  const limit = 20;
+  $('#wf-summary').textContent = '加载中…';
+  try {
+    const res = await state.api.workflowList({
+      limit,
+      offset: (w.page - 1) * limit,
+      search: w.search,
+    });
+    const table = $('#wf-table');
+    table.innerHTML = '';
+    table.appendChild(el(`<thead><tr><th style="width:80px">工单号</th><th>工单名称</th>
+      <th style="width:52px">类型</th><th style="width:80px">发起人</th><th style="width:120px">状态</th>
+      <th style="width:64px">备份</th><th style="width:140px">发起时间</th><th style="width:160px">实例 / 库</th>
+      <th style="width:90px">操作</th></tr></thead>`));
+    const tbody = document.createElement('tbody');
+    for (const r of res.rows || []) {
+      const [cls, text] = WF_STATUS[r.status] || ['gray', r.status];
+      const tr = el(`<tr data-id="${r.id}">
+        <td>${r.id}</td>
+        <td><span class="link">${escapeHtml(r.workflow_name)}</span></td>
+        <td>${SYNTAX_NAME[r.syntax_type] || r.syntax_type}</td>
+        <td>${escapeHtml(r.engineer_display)}</td>
+        <td><span class="tag ${cls}">${text}</span></td>
+        <td>${r.is_backup ? '是' : '否'}</td>
+        <td>${escapeHtml(r.create_time)}</td>
+        <td title="${escapeHtml(r.group_name || '')}">${escapeHtml(r['instance__instance_name'])}<br><span style="color:var(--text-3)">${escapeHtml(r.db_name)}</span></td>
+        <td><button class="button small" data-act="detail">详情</button></td>
+      </tr>`);
+      tr.querySelector('[data-act="detail"]').addEventListener('click', () => openWorkflowDetail(r));
+      tr.querySelector('.link').addEventListener('click', () => openWorkflowDetail(r));
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    w.total = res.total || 0;
+    $('#wf-summary').textContent = `共 ${w.total} 条`;
+    renderPager($('#wf-pager'), w.page, Math.max(1, Math.ceil(w.total / limit)), (p) => {
+      w.page = p;
+      loadWorkflows();
+    });
+  } catch (e) {
+    $('#wf-summary').textContent = `加载失败：${e.message}`;
+  }
+}
+bindSearch('#wf-search', state.workflow, loadWorkflows);
+$('#wf-refresh').addEventListener('click', loadWorkflows);
+
+async function openWorkflowDetail(r) {
+  const box = $('#wf-detail');
+  box.hidden = false;
+  box.scrollIntoView({ behavior: 'smooth' });
+  box.replaceChildren(el(`<div class="tree-empty">加载中…</div>`));
+  try {
+    const [detail, backup] = await Promise.all([
+      state.api.workflowDetail(r.id),
+      state.api.workflowBackup(r.id).catch(() => null),
+    ]);
+    const [cls, text] = WF_STATUS[r.status] || ['gray', r.status];
+    const head = el(`<div class="wf-detail-head">
+      <h3>#${r.id} ${escapeHtml(r.workflow_name)}</h3>
+      <span class="tag ${cls}">${text}</span>
+      <span class="tag gray">${SYNTAX_NAME[r.syntax_type] || ''}</span>
+      <span style="color:var(--text-3)">发起人 ${escapeHtml(r.engineer_display)} · ${escapeHtml(r.create_time)} · ${escapeHtml(r['instance__instance_name'])} / ${escapeHtml(r.db_name)}</span>
+      <span style="margin-left:auto;display:flex;gap:8px">
+        <button class="button small" id="wf-copy-all">复制全部 SQL</button>
+        ${backup?.rows?.length ? `<button class="button small" id="wf-dl-backup">${icon('rollback')} 下载回滚语句</button>` : ''}
+        <button class="icon-button" id="wf-close-detail" title="收起">${icon('close')}</button>
+      </span>
+    </div>`);
+    box.replaceChildren(head);
+    const sqlList = document.createElement('div');
+    sqlList.style.display = 'flex';
+    sqlList.style.flexDirection = 'column';
+    sqlList.style.gap = '8px';
+    sqlList.style.overflow = 'auto';
+    for (const item of detail.rows || []) {
+      const [lvCls, lvText] = ERRLEVEL_TAG[item.errlevel] || ['gray', ''];
+      const ok = /Success/i.test(item.stagestatus || '');
+      sqlList.appendChild(el(`<div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:3px">
+          <span class="tag ${ok ? 'green' : item.errlevel > 0 ? 'red' : 'gray'}">${ok ? '执行成功' : escapeHtml(item.stagestatus || item.stage)}</span>
+          ${item.errormessage ? `<span class="tag red" title="${escapeHtml(item.errormessage)}">${escapeHtml(item.errormessage.slice(0, 80))}</span>` : ''}
+          <span style="color:var(--text-3);font-size:11px">影响 ${escapeHtml(String(item.actual_affected_rows ?? item.affected_rows ?? 0))} 行</span>
+        </div>
+        <div class="wf-sql">${escapeHtml(item.sql)}</div>
+      </div>`));
+    }
+    box.appendChild(sqlList);
+    $('#wf-copy-all').addEventListener('click', () => {
+      navigator.clipboard.writeText((detail.rows || []).map((x) => x.sql + ';').join('\n'));
+      toast('已复制全部 SQL', 'success');
+    });
+    const dl = box.querySelector('#wf-dl-backup');
+    if (dl) dl.addEventListener('click', () => {
+      const sqls = (backup.rows || []).map((x) => x[0]).join('\n\n');
+      download(`rollback-${r.id}.sql`, sqls);
+    });
+    box.querySelector('#wf-close-detail').addEventListener('click', () => (box.hidden = true));
+
+    // 审批与执行操作（无权限时接口会明确报错）
+    const actions = document.createElement('div');
+    actions.className = 'wf-detail-actions';
+    const mkBtn = (label, cls, fn) => {
+      const b = el(`<button class="button small ${cls}">${label}</button>`);
+      b.addEventListener('click', fn);
+      actions.appendChild(b);
+    };
+    if (r.status === 'workflow_manreviewing') {
+      mkBtn('审核通过', 'primary', async (e) => {
+        e.target.disabled = true;
+        try {
+          await state.api.auditWorkflow({ workflowId: r.id, auditType: 'pass', auditRemark: '' });
+          toast('已通过审核', 'success');
+          loadWorkflows();
+          openWorkflowDetail(r);
+        } catch (err) {
+          toast(`操作失败：${err.message}`, 'error');
+          e.target.disabled = false;
+        }
+      });
+      mkBtn('驳回', '', async (e) => {
+        const remark = await promptText('驳回原因：');
+        if (remark === null) return;
+        e.target.disabled = true;
+        try {
+          await state.api.auditWorkflow({ workflowId: r.id, auditType: 'cancel', auditRemark: remark });
+          toast('已驳回', 'success');
+          loadWorkflows();
+          box.hidden = true;
+        } catch (err) {
+          toast(`操作失败：${err.message}`, 'error');
+          e.target.disabled = false;
+        }
+      });
+    }
+    if (r.status === 'workflow_review_pass') {
+      mkBtn('立即执行', 'primary', async (e) => {
+        if (!state.cfg.username) {
+          return toast('执行操作需要账号信息：请在扩展弹窗或设置中保存一次账号密码', 'error');
+        }
+        e.target.disabled = true;
+        try {
+          await state.api.executeWorkflow({ workflowId: r.id, engineer: state.cfg.username });
+          toast('已发起执行', 'success');
+          loadWorkflows();
+          box.hidden = true;
+        } catch (err) {
+          toast(`执行失败：${err.message}`, 'error');
+          e.target.disabled = false;
+        }
+      });
+    }
+    if (['workflow_manreviewing', 'workflow_review_pass', 'workflow_timing_task', 'workflow_queuing'].includes(r.status)) {
+      mkBtn('终止流程', '', async (e) => {
+        const remark = await promptText('终止原因（必填）：');
+        if (remark === null || !remark.trim()) return;
+        e.target.disabled = true;
+        try {
+          await state.api.auditWorkflow({ workflowId: r.id, auditType: 'cancel', auditRemark: remark });
+          toast('已终止', 'success');
+          loadWorkflows();
+          box.hidden = true;
+        } catch (err) {
+          toast(`操作失败：${err.message}`, 'error');
+          e.target.disabled = false;
+        }
+      });
+    }
+    if (actions.children.length) box.appendChild(actions);
+  } catch (e) {
+    box.replaceChildren(el(`<div class="tree-empty">${escapeHtml(e.message)}</div>`));
+  }
+}
+
+/* ======================= 草稿自动保存 ======================= */
+let draftTimer = null;
+function saveDraft() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => {
+    const cur = queryTabs.list.find((t) => t.id === queryTabs.activeId);
+    if (cur) cur.sql = editor.value;
+    localStorage.setItem(
+      'archery-draft',
+      JSON.stringify({
+        tabs: queryTabs.list.map((t) => ({ id: t.id, title: t.title, sql: t.sql })),
+        activeTab: queryTabs.activeId,
+        tabSeq: queryTabs.seq,
+        instance: $('#instance-name').value,
+        db: $('#db-name').value,
+        schema: $('#schema-name').value,
+        limit: $('#limit-num').value,
+      })
+    );
+  }, 400);
+}
+async function restoreDraft() {
+  let draft;
+  try {
+    draft = JSON.parse(localStorage.getItem('archery-draft') || 'null');
+  } catch {
+    draft = null;
+  }
+  if (!draft) return;
+  // 恢复查询标签集（兼容旧版单草稿）
+  if (Array.isArray(draft.tabs) && draft.tabs.length) {
+    queryTabs.list = draft.tabs;
+    queryTabs.seq = Math.max(draft.tabSeq || 0, ...draft.tabs.map((t) => t.id));
+    const active = draft.tabs.find((t) => t.id === draft.activeTab) || draft.tabs[0];
+    queryTabs.activeId = active.id;
+    editor.setValue(active.sql || '');
+    renderQueryTabs();
+  } else {
+    newQueryTab(draft.sql || '');
+  }
+  if (draft.limit) $('#limit-num').value = draft.limit;
+  if (draft.instance && $('#instance-name').querySelector(`option[value="${CSS.escape(draft.instance)}"]`)) {
+    setSelectValue('#instance-name', draft.instance);
+    await onInstanceChange(draft.instance, { fromTree: true });
+    if (draft.db && $('#db-name').querySelector(`option[value="${CSS.escape(draft.db)}"]`)) {
+      setSelectValue('#db-name', draft.db);
+      state.current.db = draft.db;
+      preloadTables();
+    }
+  }
+}
+
+/* ======================= 命令面板（Ctrl+K） ======================= */
+const palette = { open: false, items: [], index: 0 };
+
+function paletteActions() {
+  return [
+    { group: '功能', icon: 'code', label: 'SQL 工作台', sub: '查询', run: () => switchView('query') },
+    { group: '功能', icon: 'history', label: '查询历史', run: () => switchView('history') },
+    { group: '功能', icon: 'star', label: 'SQL 收藏', run: () => switchView('favorites') },
+    { group: '功能', icon: 'shield', label: 'SQL 审核检测', run: () => switchView('audit') },
+    { group: '功能', icon: 'flow', label: '上线工单', run: () => switchView('workflow') },
+    { group: '功能', icon: 'rollback', label: '表结构对比', run: () => switchView('diff') },
+    { group: '功能', icon: 'alert', label: '容量与事务诊断', run: () => switchView('diag') },
+    { group: '功能', icon: 'sun', label: '切换深浅主题', run: () => $('#theme-toggle').click() },
+    { group: '功能', icon: 'settings', label: '设置', run: () => $('#settings-open').click() },
+    { group: '功能', icon: 'refresh', label: '重新连接', run: () => connect() },
+  ];
+}
+
+/** 根据关键字收集候选（功能/实例/库/表/历史） */
+function paletteCandidates(kw) {
+  const lower = kw.toLowerCase();
+  const match = (t) => !kw || t.toLowerCase().includes(lower);
+  const out = [...paletteActions()];
+  // 实例
+  for (const ins of state.instances) {
+    if (match(ins.instance_name)) {
+      out.push({
+        group: '实例',
+        icon: 'database',
+        label: ins.instance_name,
+        sub: ins.db_type,
+        mono: true,
+        run: () => {
+          switchView('query');
+          setSelectValue('#instance-name', ins.instance_name);
+          onInstanceChange(ins.instance_name);
+        },
+      });
+    }
+  }
+  // 当前实例的库
+  for (const db of state.dbs) {
+    if (match(db)) {
+      out.push({
+        group: '库（当前实例）',
+        icon: 'folder',
+        label: db,
+        mono: true,
+        sub: state.current.instance,
+        run: () => {
+          switchView('query');
+          if ($('#db-name').querySelector(`option[value="${CSS.escape(db)}"]`)) {
+            $('#db-name').value = db;
+            state.current.db = db;
+            preloadTables();
+            saveDraft();
+          }
+        },
+      });
+    }
+  }
+  // 当前库的表（已加载）
+  for (const t of currentTables) {
+    if (match(t)) {
+      out.push({
+        group: '表（当前库）',
+        icon: 'table',
+        label: t,
+        mono: true,
+        sub: '查看结构',
+        run: () => {
+          switchView('query');
+          describeTable(state.current.instance, state.current.db, t);
+        },
+      });
+    }
+  }
+  // 本地最近执行（草稿 tab + 最近结果 SQL）
+  const recent = [
+    ...queryTabs.list.map((t) => ({ sql: t.sql, sub: t.title || `查询 ${t.id}` })),
+    ...[...state.results].reverse().filter((r) => r.kind === 'query').map((r) => ({ sql: r.sql, sub: r.target })),
+  ];
+  const seen = new Set();
+  for (const item of recent) {
+    if (!item.sql || seen.has(item.sql)) continue;
+    seen.add(item.sql);
+    if (match(item.sql)) {
+      out.push({
+        group: '最近 SQL',
+        icon: 'code',
+        label: item.sql.replace(/\s+/g, ' ').slice(0, 60),
+        mono: true,
+        sub: item.sub,
+        run: () => {
+          switchView('query');
+          editor.setValue(item.sql, true);
+        },
+      });
+    }
+    if (out.filter((x) => x.group === '最近 SQL').length >= 6) break;
+  }
+  const matched = out.filter((x) => match(x.label));
+  // 搜索时按「匹配位置优先、更短的名字优先」全局排序（输入 staff 时 staff 排在 astaff 前），平铺不显示分组标题
+  palette.flat = !!lower;
+  if (lower) {
+    matched.sort((a, b) => {
+      const ra = a.label.toLowerCase().indexOf(lower);
+      const rb = b.label.toLowerCase().indexOf(lower);
+      return ra - rb || a.label.length - b.label.length;
+    });
+  }
+  return matched.slice(0, 40);
+}
+
+function renderPalette() {
+  const list = $('#palette-list');
+  list.replaceChildren();
+  let lastGroup = null;
+  if (!palette.items.length) {
+    list.appendChild(el(`<div class="palette-empty">没有匹配的结果</div>`));
+    return;
+  }
+  palette.items.forEach((item, idx) => {
+    if (!palette.flat && item.group !== lastGroup) {
+      list.appendChild(el(`<div class="palette-group">${escapeHtml(item.group)}</div>`));
+      lastGroup = item.group;
+    }
+    // 命中片段高亮（搜索时）
+    const q = palette.query || '';
+    let labelHtml = escapeHtml(item.label);
+    if (q) {
+      const hi = item.label.toLowerCase().indexOf(q.toLowerCase());
+      if (hi >= 0) {
+        labelHtml =
+          escapeHtml(item.label.slice(0, hi)) +
+          '<mark>' + escapeHtml(item.label.slice(hi, hi + q.length)) + '</mark>' +
+          escapeHtml(item.label.slice(hi + q.length));
+      }
+    }
+    const div = el(`<div class="palette-item ${idx === palette.index ? 'active' : ''}">
+      ${icon(item.icon || 'chevron')}
+      <span class="${item.mono ? 'mono' : ''}">${labelHtml}</span>
+      ${item.sub ? `<span class="sub">${escapeHtml(item.sub)}</span>` : ''}
+    </div>`);
+    div.addEventListener('click', () => paletteRun(idx));
+    div.addEventListener('mousemove', () => {
+      if (palette.index !== idx) {
+        palette.index = idx;
+        renderPalette();
+      }
+    });
+    list.appendChild(div);
+  });
+  const active = list.children[[...list.children].findIndex((c) => c.classList?.contains('active'))];
+  active?.scrollIntoView({ block: 'nearest' });
+}
+
+function paletteRun(idx) {
+  const item = palette.items[idx];
+  closePalette();
+  item?.run?.();
+}
+
+function openPalette() {
+  palette.open = true;
+  palette.query = '';
+  palette.items = paletteCandidates('');
+  palette.index = 0;
+  $('#palette').hidden = false;
+  renderPalette();
+  const input = $('#palette-input');
+  input.value = '';
+  input.focus();
+}
+function closePalette() {
+  palette.open = false;
+  $('#palette').hidden = true;
+}
+
+$('#palette-input').addEventListener('input', (e) => {
+  palette.query = e.target.value.trim();
+  palette.items = paletteCandidates(palette.query);
+  palette.index = 0;
+  renderPalette();
+});
+$('#palette-input').addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    palette.index = (palette.index + 1) % Math.max(1, palette.items.length);
+    renderPalette();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    palette.index = (palette.index - 1 + palette.items.length) % Math.max(1, palette.items.length);
+    renderPalette();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    paletteRun(palette.index);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closePalette();
+  }
+});
+$('#palette').addEventListener('mousedown', (e) => {
+  if (e.target.id === 'palette') closePalette();
+});
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    palette.open ? closePalette() : openPalette();
+  }
+});
+
+/* ======================= 设置 / 快捷键 ======================= */
+$('#settings-open').addEventListener('click', async () => {
+  const cfg = await loadConfig();
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <label class="setting-row"><span>服务器地址（修改后需重新授权并登录）</span>
+      <input id="set-url" type="text" value="${escapeHtml(cfg.baseUrl)}" spellcheck="false"></label>
+    <label class="setting-row"><span>用户名</span>
+      <input id="set-user" type="text" value="${escapeHtml(cfg.username)}" autocomplete="off"></label>
+    <label class="setting-row"><span>密码</span>
+      <input id="set-pass" type="password" value="${escapeHtml(cfg.password)}" autocomplete="new-password"></label>
+    <label class="setting-row"><span>OTP 密钥（如有）</span>
+      <input id="set-totp" type="password" value="${escapeHtml(cfg.totpSecret || '')}" placeholder="otpauth:// 链接或 base32，两步验证自动登录" autocomplete="off" spellcheck="false"></label>
+    <div class="setting-actions">
+      <button class="button small" id="set-changelog">更新日志</button>
+      <button class="button small" id="set-shortcut">快捷键</button>
+      <button class="button small primary" id="set-save">保存并重连</button>
+    </div>`;
+  openModal('设置', body);
+  body.querySelector('#set-save').addEventListener('click', async () => {
+    const baseUrl = normalizeBase(body.querySelector('#set-url').value);
+    if (!/^https?:\/\/.+/.test(baseUrl)) return toast('地址格式不正确', 'error');
+    const u = new URL(baseUrl);
+    const patterns = [`${u.protocol}//${u.host}/*`, `${u.protocol}//${u.hostname}/*`];
+    let has = false;
+    for (const p of patterns) {
+      if (await chrome.permissions.contains({ origins: [p] })) {
+        has = true;
+        break;
+      }
+    }
+    if (!has) {
+      const ok = await chrome.permissions.request({ origins: [`${u.protocol}//${u.hostname}/*`] });
+      if (!ok) return toast('未授权访问新地址', 'error');
+    }
+    await saveConfig({
+      baseUrl,
+      username: body.querySelector('#set-user').value.trim(),
+      password: body.querySelector('#set-pass').value,
+      totpSecret: body.querySelector('#set-totp').value.trim(),
+    });
+    closeModal();
+    location.reload();
+  });
+  body.querySelector('#set-changelog').addEventListener('click', async () => {
+    try {
+      const md = await (await fetch(chrome.runtime.getURL('CHANGELOG.md'))).text();
+      openModal(`更新日志 · v${chrome.runtime.getManifest().version}`, el(`<div class="md-view">${renderMarkdown(md)}</div>`));
+    } catch (e) {
+      toast('更新日志读取失败', 'error');
+    }
+  });
+  body.querySelector('#set-shortcut').addEventListener('click', () => {
+    const g = document.createElement('div');
+    g.className = 'shortcut-grid';
+    g.innerHTML = `
+      <span><kbd>Ctrl</kbd> + <kbd>Enter</kbd></span><span>执行当前查询（有选中时仅执行选中部分）</span>
+      <span><kbd>Alt</kbd> + <kbd>Enter</kbd></span><span>格式化 SQL（选中部分优先）</span>
+      <span><kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd></span><span>缩进 / 反缩进当前行或选中块</span>`;
+    openModal('快捷键', g);
+  });
+});
+
+/* ======================= 启动 ======================= */
+(function fillVersion() {
+  const v = chrome.runtime.getManifest().version;
+  const badge = document.querySelector('#app-version');
+  if (badge) badge.textContent = v;
+  const foot = document.querySelector('#footer-target');
+  if (foot) foot.textContent = `v${v}`;
+})();
+if (!queryTabs.list.length) newQueryTab();
+renderResultTabs();
+renderActiveResult();
+init();

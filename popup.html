@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Archery 助手</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body class="popup-page">
+    <header class="popup-header">
+      <img class="brand-logo" src="icons/icon32.png" alt="" width="28" height="28" />
+      <div>
+        <strong>Archery 助手</strong>
+        <small>SQL 审核查询平台伴侣</small>
+      </div>
+    </header>
+    <main class="popup-main">
+      <div class="popup-account">
+        <div class="account-top">
+          <span id="popup-avatar" class="avatar">A</span>
+          <div class="account-info">
+            <strong id="popup-name">检测中…</strong>
+            <p id="popup-code">正在获取登录状态</p>
+          </div>
+          <span id="popup-status" class="connection"><i></i>检测中</span>
+        </div>
+      </div>
+      <div id="popup-message" class="popup-message" role="status" hidden></div>
+      <button class="button primary popup-open" id="open-assistant" disabled>
+        打开 SQL 工作台<span data-icon="arrow"></span>
+      </button>
+      <details class="popup-advanced">
+        <summary>自动重登凭证（可选）</summary>
+        <div class="popup-form">
+          <label class="field">
+            <span>服务器地址</span>
+            <input id="server-url" type="text" placeholder="http://archery.example.com:9123" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span>用户名</span>
+            <input id="username" type="text" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <input id="password" type="password" autocomplete="new-password" />
+          </label>
+          <label class="field">
+            <span>TOTP 密钥</span>
+            <input id="totp-secret" type="password" placeholder="启用两步验证时填写" autocomplete="off" spellcheck="false" />
+          </label>
+          <button class="button small" id="save-login">
+            <span data-icon="check"></span><span>保存凭证并登录</span>
+          </button>
+        </div>
+      </details>
+      <div class="popup-help">
+        <span data-icon="info"></span
+        ><span
+          >在浏览器登录过 Archery 即可直连；填写凭证后，会话过期时插件会自动重新登录。</span
+        >
+      </div>
+    </main>
+    <footer class="popup-footer"><span id="popup-version">对应 Archery v1.9.1</span></footer>
+    <script type="module" src="js/popup.js"></script>
+  </body>
+</html>
