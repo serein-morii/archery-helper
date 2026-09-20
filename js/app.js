@@ -4336,6 +4336,9 @@ $('#settings-open').addEventListener('click', async () => {
         status.textContent = `检测失败：${r.error || '无法访问 GitHub'}`;
         status.classList.add('err');
       }
+    } catch (e) {
+      status.textContent = `检测失败：${e.message || '未知错误'}`;
+      status.classList.add('err');
     } finally {
       btn.disabled = false;
       btn.textContent = prev;
@@ -4467,8 +4470,8 @@ async function fetchRemoteManifestVersion() {
 }
 
 async function checkRemoteVersion({ force = false } = {}) {
-  const local = chrome.runtime.getManifest().version;
   try {
+    const local = chrome.runtime.getManifest().version;
     let remote;
     if (!force) {
       const { versionCheck } = await chrome.storage.local.get('versionCheck');
