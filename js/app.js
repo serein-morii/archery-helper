@@ -1000,9 +1000,10 @@ function confirmRebuildIndex({ firstRun = false } = {}) {
       const kw = e.target.value.trim().toLowerCase();
       const groups = [...tree.querySelectorAll(':scope > .idxp-group')];
       const reset = (node) => {
-        node.querySelectorAll('.idxp-row').forEach((r) => r.classList.remove('filtered-hide'));
-        node.classList.remove('open');
-        node.querySelector(':scope > .idxp-row')?.classList.remove('expanded');
+        // 彻底还原：组自身的过滤隐藏 + 所有子行/子节点的隐藏与展开状态全部清除
+        node.classList.remove('filtered-hide', 'open');
+        node.querySelectorAll('.idxp-node').forEach((n) => n.classList.remove('open'));
+        node.querySelectorAll('.idxp-row').forEach((r) => r.classList.remove('filtered-hide', 'expanded'));
       };
       if (!kw) {
         groups.forEach(reset);
