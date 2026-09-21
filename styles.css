@@ -438,6 +438,32 @@ body.sidebar-collapsed #sidebar-toggle:hover {
   padding: 0 6px;
   line-height: 16px;
 }
+/* 索引全库搜索结果（数据浏览器搜索框） */
+.tree-node.idx-results {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+}
+.tree-row.idx-head {
+  height: 26px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  cursor: default;
+}
+.tree-row.idx-head .label { font-size: 10.5px; }
+.tree-row .sub {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--text-3);
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl; /* 长实例名保留尾部（区分环境后缀） */
+  text-align: right;
+}
 .tree-children {
   margin-left: 16px;
   border-left: 1px dashed color-mix(in srgb, var(--border) 88%, transparent);

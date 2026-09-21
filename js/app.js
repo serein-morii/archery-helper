@@ -226,11 +226,16 @@ async function connect() {
     buildInstanceSelectors();
     buildTree();
     restoreDraft();
-    // 连接成功后：索引为空或全量索引超过 7 天 → 后台自动重建（库+表级，不阻塞使用，进度见侧边栏）
+    // 连接成功后：完全没有索引时才自动后台重建一次（实例多较慢，有进度不阻塞）；过期只提醒手动重构
     metaIndex.load().then(() => {
       const empty = !Object.keys(metaIndex.data.dbs).length;
       const stale = Date.now() - (metaIndex.data.updatedAt || 0) > META_INDEX_TTL;
-      if ((empty || stale) && state.instances.length) runFullIndexBuild();
+      if (empty && state.instances.length) {
+        toast('首次使用：正在后台建立全库搜索索引（可能需要几分钟），完成后可在数据浏览器搜索框搜全部表名', 'info');
+        runFullIndexBuild();
+      } else if (stale && state.instances.length) {
+        toast('搜索索引已超过 7 天，如需最新表清单可点数据浏览器刷新按钮 →「重构搜索索引」', 'info');
+      }
     });
     // 无凭证（纯浏览器会话）时，用自己最近一条查询日志取显示名
     if (!state.cfg.username) {
@@ -456,6 +461,58 @@ function renderTree() {
   const filter = $('#tree-search').value.trim().toLowerCase();
   const container = $('#object-tree');
   const frag = document.createDocumentFragment();
+
+  // 索引全库搜索：搜到未展开的库 / 表（数据来自本地缓存索引）
+  if (filter) {
+    const idxBox = el(`<div class="tree-node idx-results"></div>`);
+    if (!metaIndex.loaded || !Object.keys(metaIndex.data.dbs).length) {
+      idxBox.appendChild(el(`<div class="tree-row idx-head"><span class="label">全库搜索：暂无索引</span></div>`));
+      idxBox.appendChild(el(`<div class="tree-empty" style="padding:8px 12px">点上方刷新按钮 →「重构搜索索引」后，可搜到全部实例的库和表</div>`));
+    } else {
+      const dbHits = [];
+      const tableHits = [];
+      const seenDb = new Set();
+      for (const entry of Object.values(metaIndex.data.dbs)) {
+        if (entry.db.toLowerCase().includes(filter) && !seenDb.has(`${entry.instance}|${entry.db}`) && dbHits.length < 8) {
+          seenDb.add(`${entry.instance}|${entry.db}`);
+          dbHits.push(entry);
+        }
+        for (const tb of entry.tables || []) {
+          if (tableHits.length < 30 && tb.toLowerCase().includes(filter)) {
+            tableHits.push({ entry, tb });
+          }
+        }
+      }
+      idxBox.appendChild(el(`<div class="tree-row idx-head"><span class="label">全库搜索 · ${tableHits.length} 张表 / ${dbHits.length} 个库</span></div>`));
+      for (const d of dbHits) {
+        const row = el(`<div class="tree-row" title="${escapeHtml(`${d.instance}/${d.db}`)}">
+          <span class="icon" data-icon="folder"></span>
+          <span class="label"><b>${escapeHtml(d.db)}</b></span>
+          <span class="sub">${escapeHtml(d.instance)}</span>
+        </div>`);
+        row.addEventListener('click', async () => {
+          switchView('query');
+          await selectInstance(d.instance);
+          setSelectValue('#db-name', d.db);
+        });
+        idxBox.appendChild(row);
+      }
+      for (const { entry, tb } of tableHits) {
+        const row = el(`<div class="tree-row" title="${escapeHtml(`${entry.instance}/${entry.db}.${tb}`)}">
+          <span class="icon" data-icon="table"></span>
+          <span class="label">${escapeHtml(tb)}</span>
+          <span class="sub">${escapeHtml(entry.db)}</span>
+        </div>`);
+        row.addEventListener('click', () => jumpToTable(entry.instance, entry.db, tb));
+        idxBox.appendChild(row);
+      }
+      if (!dbHits.length && !tableHits.length) {
+        idxBox.appendChild(el(`<div class="tree-empty" style="padding:8px 12px">全库搜索无匹配</div>`));
+      }
+    }
+    frag.appendChild(idxBox);
+  }
+
   for (const group of tree.root) {
     const gNode = el(`<div class="tree-node open" data-kind="group" data-name="${escapeHtml(group.name)}"></div>`);
     const gRow = el(`<div class="tree-row expanded">
@@ -758,11 +815,12 @@ $('#refresh-tree').addEventListener('click', (e) => {
   ]);
 });
 
-/** 深度重构索引前的耗时确认 */
+/** 重构索引前的耗时确认 */
 function confirmRebuildIndex() {
   if (indexBuilding) {
     setIndexProgress(true);
-    return toast('索引正在重建中（进度见左侧），请等待完成', 'info');
+    const txt = $('#index-progress-text')?.textContent || '';
+    return toast(`索引正在重建中${txt ? `（${txt}）` : ''}，完成后即可搜索，无需重复操作`, 'info');
   }
   const body = el(`<div>
     <p style="margin:0 0 12px;font-size:12.5px;line-height:1.7;color:var(--text-2)">
@@ -890,32 +948,43 @@ async function indexDbLazy(instance, db) {
   } catch { /* 静默：索引失败不影响查询 */ }
 }
 
-/** 全量重建：所有实例 → 所有库的表清单；进度回调 (done, total, text) */
+/** 简易并发池：limit 路并发跑完 items */
+async function poolRun(items, limit, worker) {
+  let i = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (i < items.length) await worker(items[i++]).catch(() => {});
+    })
+  );
+}
+
+/** 全量重建：所有实例 → 所有库的表清单；2 路并发 + 请求间隔（单请求 3-6s，纯串行太慢、高并发怕压垮服务端）；进度直接驱动侧边栏进度条 */
 let indexBuilding = false;
-async function rebuildFullIndex(onProgress) {
+async function rebuildFullIndex() {
   if (indexBuilding) throw new Error('索引正在重建中，请稍候');
   indexBuilding = true;
   try {
     await metaIndex.load();
-    let total = 0, done = 0;
+    const instances = state.instances;
+    // 阶段一：逐实例拉库清单（带进度）
     const allPairs = [];
-    for (const ins of state.instances) {
-      try {
-        const res = await state.api.databases(ins.instance_name);
-        if (res.status !== 0) continue;
-        for (const db of res.data || []) allPairs.push([ins.instance_name, db]);
-      } catch { /* 单实例失败跳过 */ }
-    }
-    total = allPairs.length;
+    let insDone = 0;
+    await poolRun(instances, 2, async (ins) => {
+      const res = await state.api.databases(ins.instance_name);
+      insDone += 1;
+      setIndexProgress(true, `拉取实例清单 ${insDone}/${instances.length}（${Math.round((insDone / instances.length) * 100)}%）：${ins.instance_name}`, (insDone / instances.length) * 100);
+      if (res.status === 0) for (const db of res.data || []) allPairs.push([ins.instance_name, db]);
+      await new Promise((r) => setTimeout(r, 30)); // 请求间隔，压低服务端压力
+    });
+    // 阶段二：逐库拉表清单（带进度）
+    const total = allPairs.length;
     if (!total) throw new Error('没有可索引的库（实例列表为空或库清单拉取失败）');
-    for (const [instance, db] of allPairs) {
+    let done = 0;
+    await poolRun(allPairs, 2, async ([instance, db]) => {
+      await indexDb(instance, db, { persist: false }); // 全部完成统一落盘
       done += 1;
-      onProgress?.(done, total, `${instance}/${db}`);
-      try {
-        await indexDb(instance, db, { persist: false }); // 全部完成统一落盘，避免几百次 storage 写
-      } catch { /* 单库失败继续 */ }
-      await new Promise((r) => setTimeout(r, 20)); // 轻微限速，避免打挂服务端
-    }
+      setIndexProgress(true, `索引 ${done}/${total}（${Math.round((done / total) * 100)}%）：${instance}/${db}`, (done / total) * 100);
+    });
     metaIndex.data.updatedAt = Date.now();
     await metaIndex.save();
     return { total };
@@ -941,13 +1010,12 @@ async function runFullIndexBuild() {
     setIndexProgress(true);
     return toast('索引正在重建中（进度见左侧），请等待完成', 'info');
   }
-  setIndexProgress(true, '正在拉取库清单…');
+  setIndexProgress(true, '准备拉取…');
+  toast('已开始重构搜索索引，进度见左侧数据浏览器', 'info');
   try {
-    const { total } = await rebuildFullIndex((done, t, name) => {
-      setIndexProgress(true, `索引 ${done}/${t}（${Math.round((done / t) * 100)}%）：${name}`, (done / t) * 100);
-    });
+    const { total } = await rebuildFullIndex();
     setIndexProgress(false);
-    toast(`搜索索引已重建：${total} 个库，现在可搜索全部表名`, 'success');
+    toast(`搜索索引已重建：${total} 个库，现在可在数据浏览器搜索框搜到全部表名`, 'success');
   } catch (e) {
     setIndexProgress(false);
     toast(`索引重建失败：${e.message}`, 'error');
