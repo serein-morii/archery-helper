@@ -356,6 +356,7 @@ body.sidebar-collapsed #sidebar-toggle:hover {
 .icon-button:hover { background: var(--panel-3); color: var(--text-1); }
 .icon-button.danger:hover { background: var(--danger-soft); color: var(--danger); }
 .icon-button:active { transform: scale(0.9); }
+.icon-button.active { color: var(--brand); background: var(--brand-softer); }
 .icon-button:disabled { opacity: 0.35; cursor: not-allowed; }
 .sidebar-search { margin: 0 12px 10px; }
 .search-field {

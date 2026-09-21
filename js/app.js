@@ -1069,8 +1069,38 @@ $('#sidebar-toggle').addEventListener('click', () => {
 })();
 
 /* ======================= 编辑器 ======================= */
+/* 实时缓存开关（默认开）：编辑器每次输入都防抖保存草稿（实例/库/SQL/标签），刷新页面不丢 */
+const autoCache = { on: true, timer: null };
+chrome.storage.local.get({ 'sql-autocache': true }).then((o) => {
+  autoCache.on = o['sql-autocache'] !== false;
+  syncAutoCacheBtn();
+  $('#autosave').hidden = !autoCache.on;
+});
+function syncAutoCacheBtn() {
+  const btn = $('#sql-autocache');
+  if (!btn) return;
+  btn.classList.toggle('active', autoCache.on);
+  btn.title = autoCache.on ? '实时缓存已开启：输入即保存，刷新页面不丢失（点击关闭）' : '实时缓存已关闭（点击开启）';
+}
+$('#sql-autocache').addEventListener('click', async () => {
+  autoCache.on = !autoCache.on;
+  await chrome.storage.local.set({ 'sql-autocache': autoCache.on });
+  syncAutoCacheBtn();
+  $('#autosave').hidden = !autoCache.on;
+  toast(autoCache.on ? '实时缓存已开启：SQL 输入即保存' : '实时缓存已关闭：仅执行查询时保存草稿', 'info');
+  if (autoCache.on) saveDraft();
+});
+function scheduleAutoSave() {
+  if (!autoCache.on) return;
+  clearTimeout(autoCache.timer);
+  autoCache.timer = setTimeout(() => saveDraft(), 800);
+}
+
 const editor = new SqlEditor($('#editor'), {
-  onChange: updateEditorHint,
+  onChange: () => {
+    updateEditorHint();
+    scheduleAutoSave(); // 实时缓存：输入即保存（防抖）
+  },
   onRun: runQuery,
   onAltRun: () => formatSql(),
   onSuggest: suggestItems,
@@ -4583,23 +4613,31 @@ async function openWorkflowDetail(r) {
 let draftTimer = null;
 function saveDraft() {
   clearTimeout(draftTimer);
-  draftTimer = setTimeout(() => {
-    const cur = queryTabs.list.find((t) => t.id === queryTabs.activeId);
-    if (cur) cur.sql = editor.value;
-    localStorage.setItem(
-      'archery-draft',
-      JSON.stringify({
-        tabs: queryTabs.list.map((t) => ({ id: t.id, title: t.title, sql: t.sql })),
-        activeTab: queryTabs.activeId,
-        tabSeq: queryTabs.seq,
-        instance: $('#instance-name').value,
-        db: $('#db-name').value,
-        schema: $('#schema-name').value,
-        limit: $('#limit-num').value,
-      })
-    );
-  }, 400);
+  draftTimer = setTimeout(saveDraftNow, 400);
 }
+function saveDraftNow() {
+  const cur = queryTabs.list.find((t) => t.id === queryTabs.activeId);
+  if (cur) cur.sql = editor.value;
+  localStorage.setItem(
+    'archery-draft',
+    JSON.stringify({
+      tabs: queryTabs.list.map((t) => ({ id: t.id, title: t.title, sql: t.sql })),
+      activeTab: queryTabs.activeId,
+      tabSeq: queryTabs.seq,
+      instance: $('#instance-name').value,
+      db: $('#db-name').value,
+      schema: $('#schema-name').value,
+      limit: $('#limit-num').value,
+    })
+  );
+}
+// 关闭/刷新页面前立即落盘，防止防抖窗口内的最后一次输入丢失
+window.addEventListener('beforeunload', () => {
+  if (autoCache.on) {
+    clearTimeout(draftTimer);
+    saveDraftNow();
+  }
+});
 async function restoreDraft() {
   let draft;
   try {

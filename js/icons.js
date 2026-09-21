@@ -43,6 +43,7 @@ const ICONS = {
   list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h1m-1 6h1m-1 6h1"/>',
   user: '<circle cx="12" cy="8.2" r="3.7"/><path d="M4.8 20.2a7.6 7.6 0 0 1 14.4 0"/>',
   panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9.5 4v16"/><path d="m5.5 10 1.5 1.5L5.5 13"/>',
+  save: '<path d="M5 3h11l5 5v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M7 3v5h8"/><path d="M7 21v-7h10v7"/>',
 };
 
 export function icon(name, cls = '') {
