@@ -226,18 +226,6 @@ async function connect() {
     buildInstanceSelectors();
     buildTree();
     restoreDraft();
-    // 连接成功后：完全没有索引时（首次使用）弹出范围选择器让用户勾选需要初始化的实例——一般用不到全部；
-    // 过期只提醒手动重构
-    metaIndex.load().then(() => {
-      const empty = !Object.keys(metaIndex.data.dbs).length;
-      const stale = Date.now() - (metaIndex.data.updatedAt || 0) > META_INDEX_TTL;
-      if (empty && state.instances.length) {
-        toast('首次使用：请选择需要初始化搜索索引的范围（建议只勾常用实例，之后可随时增量更新）', 'info');
-        confirmRebuildIndex({ firstRun: true });
-      } else if (stale && state.instances.length) {
-        toast('搜索索引已超过 7 天，如需最新表清单可点数据浏览器刷新按钮 →「重构搜索索引」', 'info');
-      }
-    });
     // 无凭证（纯浏览器会话）时，用自己最近一条查询日志取显示名
     if (!state.cfg.username) {
       state.api
@@ -829,7 +817,7 @@ $('#refresh-tree').addEventListener('click', () => {
 });
 
 /** 重构索引：范围选择器（树形到库级；部分=增量更新，全选=完全重建） */
-function confirmRebuildIndex({ firstRun = false } = {}) {
+function confirmRebuildIndex() {
   if (indexBuilding) {
     setIndexProgress(true);
     const txt = $('#index-progress-text')?.textContent || '';
@@ -844,10 +832,8 @@ function confirmRebuildIndex({ firstRun = false } = {}) {
     }
     const body = el(`<div class="idx-picker">
       <p class="idxp-desc">
-        ${firstRun
-          ? `首次使用：勾选<b>需要初始化</b>的类型 / 实例 / 库（建议只勾常用实例，一般用不到全部）。<br />索引只拉「库 + 表」清单、不拉字段与详情；之后可随时从刷新按钮增量更新。`
-          : `勾选<b>实例</b> = 更新该实例全部库；单独勾<b>库</b> = 只更新该库（其余索引保留，<b>增量更新</b>）。<br />
-        点「全选」= <b>完全重建</b>（清空后拉取全部实例，耗时较长）。`}
+        <b style="color:var(--warn)">索引仅为「搜索框搜表名」服务，如无此需求不建议重建</b>——重建会逐实例拉取库表清单、消耗服务端资源；对象树浏览与查询不依赖索引，完全不受影响。<br /><br />
+        勾选<b>实例</b> = 更新该实例全部库；单独勾<b>库</b> = 只更新该库（其余索引保留，<b>增量更新</b>）；「全选」= <b>完全重建</b>（清空后拉取全部，耗时较长）。只拉「库 + 表」清单，不拉字段与详情。
       </p>
       <div class="idx-picker-bar">
         <div class="search-field" style="flex:1;min-width:160px;height:30px">
@@ -1062,7 +1048,7 @@ function confirmRebuildIndex({ firstRun = false } = {}) {
       closeModal();
       runIndexUpdate(insSel, dbSel, { wipe: isFullSelection() });
     });
-    openModal(firstRun ? '初始化搜索索引 · 选择范围' : '重构搜索索引 · 选择范围', body, { wide: true });
+    openModal('重构搜索索引 · 选择范围', body, { wide: true });
   });
 }
 
@@ -1254,41 +1240,6 @@ async function poolRun(items, limit, worker) {
   );
 }
 
-/** 全量重建：所有实例 → 所有库的表清单；2 路并发 + 请求间隔（单请求 3-6s，纯串行太慢、高并发怕压垮服务端）；进度直接驱动侧边栏进度条 */
-let indexBuilding = false;
-async function rebuildFullIndex() {
-  if (indexBuilding) throw new Error('索引正在重建中，请稍候');
-  indexBuilding = true;
-  try {
-    await metaIndex.load();
-    const instances = state.instances;
-    // 阶段一：逐实例拉库清单（带进度）
-    const allPairs = [];
-    let insDone = 0;
-    await poolRun(instances, 2, async (ins) => {
-      const res = await state.api.databases(ins.instance_name);
-      insDone += 1;
-      setIndexProgress(true, `拉取实例清单 ${insDone}/${instances.length}（${Math.round((insDone / instances.length) * 100)}%）：${ins.instance_name}`, (insDone / instances.length) * 100);
-      if (res.status === 0) for (const db of res.data || []) allPairs.push([ins.instance_name, db]);
-      await new Promise((r) => setTimeout(r, 30)); // 请求间隔，压低服务端压力
-    });
-    // 阶段二：逐库拉表清单（带进度）
-    const total = allPairs.length;
-    if (!total) throw new Error('没有可索引的库（实例列表为空或库清单拉取失败）');
-    let done = 0;
-    await poolRun(allPairs, 2, async ([instance, db]) => {
-      await indexDb(instance, db, { persist: false }); // 全部完成统一落盘
-      done += 1;
-      setIndexProgress(true, `索引 ${done}/${total}（${Math.round((done / total) * 100)}%）：${instance}/${db}`, (done / total) * 100);
-    });
-    metaIndex.data.updatedAt = Date.now();
-    await metaIndex.save();
-    return { total };
-  } finally {
-    indexBuilding = false;
-  }
-}
-
 /** 索引进度条（侧边栏）：visible + 文案 + 百分比 */
 function setIndexProgress(visible, text, pct) {
   const bar = $('#index-progress');
@@ -1299,25 +1250,6 @@ function setIndexProgress(visible, text, pct) {
   if (fill) fill.style.width = pct != null ? `${Math.max(0, Math.min(100, Math.round(pct)))}%` : '0%';
 }
 
-/** 全量重建（库+表级），带进度 */
-async function runFullIndexBuild() {
-  if (!state.instances.length) return toast('请先连接 Archery（等待实例列表加载）', 'error');
-  if (indexBuilding) {
-    setIndexProgress(true);
-    const txt = $('#index-progress-text')?.textContent || '';
-    return toast(`⚠ 索引重建进行中${txt ? `（${txt}）` : ''}，请等待完成，请勿重复拉取`, 'error');
-  }
-  setIndexProgress(true, '准备拉取…');
-  toast('已开始重构搜索索引，进度见左侧数据浏览器', 'info');
-  try {
-    const { total } = await rebuildFullIndex();
-    setIndexProgress(false);
-    toast(`搜索索引已重建：${total} 个库，现在可在数据浏览器搜索框搜到全部表名`, 'success');
-  } catch (e) {
-    setIndexProgress(false);
-    toast(`索引重建失败：${e.message}`, 'error');
-  }
-}
 
 async function suggestItems({ table, prefix }) {
   if (table) {
