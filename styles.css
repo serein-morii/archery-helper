@@ -1321,19 +1321,35 @@ body.results-expanded .editor-toolbar { display: none; }
 .index-progress {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   margin: 0 12px 8px;
-  padding: 6px 10px;
-  border: 1px dashed var(--border-strong);
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--brand) 30%, var(--border));
+  background: var(--brand-softer);
   border-radius: 9px;
   color: var(--text-2);
   font-size: 11.5px;
 }
-.index-progress .spinner { width: 12px; height: 12px; border-width: 2px; }
-.index-progress span:last-child {
+.index-progress .spinner { width: 12px; height: 12px; border-width: 2px; flex: none; }
+.ip-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.ip-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.ip-bar {
+  height: 4px;
+  border-radius: 99px;
+  background: var(--panel-3);
+  overflow: hidden;
+}
+.ip-bar i {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: 99px;
+  background: var(--brand-grad);
+  transition: width 0.3s ease;
 }
 
 /* ---------- 对比历史（本地，点击重放） ---------- */

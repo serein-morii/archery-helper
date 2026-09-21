@@ -69,15 +69,16 @@
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-title">
           <h2>数据浏览器</h2>
-          <button class="icon-button" id="rebuild-index" title="重建搜索索引（全实例库表，供顶部搜索搜表/搜字段）" aria-label="重建搜索索引">
-            <span data-icon="search"></span>
-          </button>
-          <button class="icon-button" id="refresh-tree" title="刷新实例与对象" aria-label="刷新实例与对象">
+          <button class="icon-button" id="refresh-tree" title="刷新实例与对象 / 重构搜索索引" aria-label="刷新或重构索引">
             <span data-icon="refresh"></span>
           </button>
         </div>
         <div id="index-progress" class="index-progress" hidden>
-          <span class="spinner"></span><span id="index-progress-text">索引中…</span>
+          <span class="spinner"></span>
+          <div class="ip-body">
+            <div class="ip-text" id="index-progress-text">索引中…</div>
+            <div class="ip-bar"><i id="index-progress-bar"></i></div>
+          </div>
         </div>
         <div class="sidebar-modes" role="tablist" aria-label="浏览模式">
           <button class="mode-btn active" id="mode-object" role="tab">对象</button>

@@ -737,10 +737,50 @@ function highlightTreeNode(path = []) {
 }
 
 $('#tree-search').addEventListener('input', renderTree);
-$('#refresh-tree').addEventListener('click', async () => {
-  await connect();
-  toast('数据浏览器已刷新', 'success');
+/* 刷新按钮：弹出选择（刷新页面 / 重构搜索索引） */
+$('#refresh-tree').addEventListener('click', (e) => {
+  e.stopPropagation(); // 防止本次点击冒泡到全局监听立即关闭菜单
+  const r = e.currentTarget.getBoundingClientRect();
+  showContextMenu(r.right + 4, r.top, [
+    {
+      label: '刷新实例与对象',
+      icon: 'refresh',
+      action: async () => {
+        await connect();
+        toast('数据浏览器已刷新', 'success');
+      },
+    },
+    {
+      label: '重构搜索索引（全量，含字段）',
+      icon: 'search',
+      action: confirmRebuildIndex,
+    },
+  ]);
 });
+
+/** 深度重构索引前的耗时确认 */
+function confirmRebuildIndex() {
+  if (indexBuilding) {
+    setIndexProgress(true);
+    return toast('索引正在后台重建中（进度见左侧），完成后再试', 'info');
+  }
+  const body = el(`<div>
+    <p style="margin:0 0 12px;font-size:12.5px;line-height:1.7;color:var(--text-2)">
+      将遍历<b>全部实例</b>逐库重建搜索索引（含全字段），供顶部搜索搜表名 / 字段名。<br />
+      实例较多时<b>耗时可能达数分钟</b>；期间可正常使用其他功能，进度显示在左侧数据浏览器。
+    </p>
+    <div class="setting-actions">
+      <button class="button" id="idx-cancel">取消</button>
+      <button class="button primary" id="idx-go">${icon('search')}<span>开始重建</span></button>
+    </div>
+  </div>`);
+  body.querySelector('#idx-cancel').addEventListener('click', closeModal);
+  body.querySelector('#idx-go').addEventListener('click', () => {
+    closeModal();
+    runFullIndexBuild({ deep: true });
+  });
+  openModal('重构搜索索引', body);
+}
 
 /* 侧边栏折叠与拖宽 */
 const syncSidebarToggle = () => {
@@ -896,21 +936,28 @@ async function rebuildFullIndex(onProgress, { deep = false } = {}) {
   }
 }
 
-/** 索引进度条（侧边栏） */
-function setIndexProgress(visible, text) {
+/** 索引进度条（侧边栏）：visible + 文案 + 百分比 */
+function setIndexProgress(visible, text, pct) {
   const bar = $('#index-progress');
   if (!bar) return;
   bar.hidden = !visible;
-  if (text) $('#index-progress-text').textContent = text;
+  if (text != null) $('#index-progress-text').textContent = text;
+  const fill = $('#index-progress-bar');
+  if (fill) fill.style.width = pct != null ? `${Math.max(0, Math.min(100, Math.round(pct)))}%` : '0%';
 }
 
 /** 手动重建（含全字段，慢但可搜任意字段），带进度 */
 async function runFullIndexBuild({ deep = true } = {}) {
   if (!state.instances.length) return toast('请先连接 Archery（等待实例列表加载）', 'error');
+  // 后台自动索引进行中：不报错、不隐藏其进度，提示等它完成
+  if (indexBuilding) {
+    setIndexProgress(true);
+    return toast(deep ? '索引正在后台重建中（进度见左侧），完成后再点可深度重建（含字段）' : '索引正在重建中，进度见左侧数据浏览器', 'info');
+  }
   setIndexProgress(true, '正在拉取库清单…');
   try {
     const { total } = await rebuildFullIndex((done, t, name) => {
-      setIndexProgress(true, `索引 ${done}/${t}：${name}`);
+      setIndexProgress(true, `索引 ${done}/${t}（${Math.round((done / t) * 100)}%）：${name}`, (done / t) * 100);
     }, { deep });
     setIndexProgress(false);
     toast(`搜索索引已重建：${total} 个库${deep ? '（含字段）' : '（表级）'}`, 'success');
@@ -919,7 +966,6 @@ async function runFullIndexBuild({ deep = true } = {}) {
     toast(`索引重建失败：${e.message}`, 'error');
   }
 }
-$('#rebuild-index').addEventListener('click', runFullIndexBuild);
 
 async function suggestItems({ table, prefix }) {
   if (table) {
@@ -4388,7 +4434,7 @@ function paletteActions() {
     { group: '功能', icon: 'sun', label: '切换深浅主题', run: () => $('#theme-toggle').click() },
     { group: '功能', icon: 'settings', label: '设置', run: () => $('#settings-open').click() },
     { group: '功能', icon: 'refresh', label: '重新连接', run: () => connect() },
-    { group: '功能', icon: 'search', label: '重建搜索索引', sub: '全实例库表缓存，供搜表/搜字段', run: () => runFullIndexBuild() },
+    { group: '功能', icon: 'search', label: '重构搜索索引', sub: '全实例库表缓存，供搜表/搜字段', run: () => confirmRebuildIndex() },
   ];
 }
 
