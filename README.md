@@ -86,3 +86,7 @@ icons/               扩展图标
 `/sqlworkflow/detail_content/`、`/sqlworkflow/backup_sql/`、`/api/v1/workflow/sqlcheck/`、
 `/data_dictionary/table_list|table_info/`、`/db_diagnostic/tablesapce/`、`/db_diagnostic/innodb_trx/`、
 `/api/v1/workflow/`（提单）、`/api/v1/workflow/audit/`（审批）、`/api/v1/workflow/execute/`（执行）
+
+## 开源协议
+
+[MIT](./LICENSE) © 2026 serein-morii
