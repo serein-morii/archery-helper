@@ -885,7 +885,7 @@ function confirmRebuildIndex({ firstRun = false } = {}) {
         const gnode = el(`<div class="idxp-group"></div>`);
         const grow = el(`<div class="idxp-row idxp-group-row" title="展开/收起">
           <span class="caret" data-icon="right"></span>
-          <input type="checkbox" data-kind="group" title="勾选 = 更新该类型下全部实例">
+          <input type="checkbox" data-kind="group" title="勾选 = 更新该类型实例（筛选时只作用于可见项）">
           <span class="icon" data-icon="folder"></span>
           <span class="label"><b>${escapeHtml(gname)}</b></span>
           <span class="count">${list.length}</span>
@@ -893,14 +893,17 @@ function confirmRebuildIndex({ firstRun = false } = {}) {
         const groupBox = grow.querySelector('input');
         const groupNames = list.map((i) => i.instance_name);
         groupBoxes.push({ box: groupBox, names: groupNames });
-        // 勾类型 = 联动勾上该类型全部实例及其库
+        // 勾类型 = 联动勾上该类型实例及其库；筛选状态下只作用于当前可见行（清除筛选后勾选保留，可分批筛选累积勾选）
         const applyGroup = (checked) => {
           for (const it of insBoxes) {
             if (!groupNames.includes(it.name)) continue;
+            if (it.box.closest('.idxp-row')?.classList.contains('filtered-hide')) continue;
             it.box.checked = checked;
           }
           for (const d of dbBoxes) {
-            if (groupNames.includes(d.ins)) d.box.checked = checked;
+            if (!groupNames.includes(d.ins)) continue;
+            if (d.box.closest('.idxp-row')?.classList.contains('filtered-hide')) continue;
+            d.box.checked = checked;
           }
           sync();
         };
@@ -945,21 +948,22 @@ function confirmRebuildIndex({ firstRun = false } = {}) {
           if (!ikids.children.length) {
             ikids.appendChild(el(`<div class="idxp-row idxp-none">（未索引过：勾选实例将拉取其全部库）</div>`));
           }
-          // 点箭头收起/展开；点行其他区域切换勾选（勾实例联动勾库）
+          // 点箭头收起/展开；点行其他区域切换勾选（勾实例联动勾库；筛选状态下只联动可见库）
+          const applyIns = () => {
+            ikids.querySelectorAll('.idxp-db-row').forEach((row) => {
+              if (!row.classList.contains('filtered-hide')) row.querySelector('input').checked = insBox.checked;
+            });
+            sync();
+          };
           irow.addEventListener('click', (ev) => {
             if (ev.target.closest('.caret')) {
               inode.classList.toggle('open');
               irow.classList.toggle('expanded');
               return;
             }
-            if (ev.target === insBox) {
-              // 直接点 checkbox：原生已切换，仅联动子库
-              ikids.querySelectorAll('input[type="checkbox"]').forEach((b) => (b.checked = insBox.checked));
-              return sync();
-            }
+            if (ev.target === insBox) return applyIns(); // 直接点 checkbox：原生已切换
             insBox.checked = !insBox.checked;
-            ikids.querySelectorAll('input[type="checkbox"]').forEach((b) => (b.checked = insBox.checked));
-            sync();
+            applyIns();
           });
           inode.append(irow, ikids);
           gkids.appendChild(inode);
