@@ -861,6 +861,7 @@ function confirmRebuildIndex() {
     const summary = body.querySelector('#idxp-summary');
     const goBtn = body.querySelector('#idx-go');
     const insBoxes = [];
+    const groupBoxes = [];
     const dbBoxes = [];
 
     const renderPickerTree = () => {
@@ -875,13 +876,34 @@ function confirmRebuildIndex() {
         const gnode = el(`<div class="idxp-group"></div>`);
         const grow = el(`<div class="idxp-row idxp-group-row" title="展开/收起">
           <span class="caret" data-icon="right"></span>
+          <input type="checkbox" data-kind="group" title="勾选 = 更新该类型下全部实例">
           <span class="icon" data-icon="folder"></span>
           <span class="label"><b>${escapeHtml(gname)}</b></span>
           <span class="count">${list.length}</span>
         </div>`);
-        grow.addEventListener('click', () => {
-          gnode.classList.toggle('open');
-          grow.classList.toggle('expanded');
+        const groupBox = grow.querySelector('input');
+        const groupNames = list.map((i) => i.instance_name);
+        groupBoxes.push({ box: groupBox, names: groupNames });
+        // 勾类型 = 联动勾上该类型全部实例及其库
+        const applyGroup = (checked) => {
+          for (const it of insBoxes) {
+            if (!groupNames.includes(it.name)) continue;
+            it.box.checked = checked;
+          }
+          for (const d of dbBoxes) {
+            if (groupNames.includes(d.ins)) d.box.checked = checked;
+          }
+          sync();
+        };
+        grow.addEventListener('click', (ev) => {
+          if (ev.target.closest('.caret')) {
+            gnode.classList.toggle('open');
+            grow.classList.toggle('expanded');
+            return;
+          }
+          if (ev.target === groupBox) return applyGroup(groupBox.checked); // 原生已切换
+          groupBox.checked = !groupBox.checked || groupBox.indeterminate;
+          applyGroup(groupBox.checked);
         });
         gnode.appendChild(grow);
         const gkids = el(`<div class="idxp-children"></div>`);
@@ -947,6 +969,14 @@ function confirmRebuildIndex() {
       summary.textContent = n ? `已选 ${insSel.length} 个实例 + ${dbSel.length} 个库` : '未选择';
       goBtn.disabled = !n;
       goBtn.querySelector('span').textContent = isFullSelection() ? '完全重建' : `开始更新（${n} 项）`;
+      // 类型框回写：全勾 = 勾选，部分勾 = 半选（indeterminate）
+      for (const g of groupBoxes) {
+        const items = insBoxes.filter((x) => g.names.includes(x.name));
+        const all = items.length > 0 && items.every((x) => x.box.checked);
+        const some = items.some((x) => x.box.checked);
+        g.box.checked = all;
+        g.box.indeterminate = some && !all;
+      }
     };
     const isFullSelection = () => insBoxes.length > 0 && insBoxes.every((x) => x.box.checked);
 
