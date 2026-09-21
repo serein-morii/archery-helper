@@ -520,6 +520,17 @@ body.sidebar-collapsed #sidebar-toggle:hover {
   background: var(--panel);
   box-shadow: var(--shadow-sm);
 }
+/* 表格滚动容器内吸底的操作行（如单表对比「查看完整建表语句」） */
+.data-table td.diff-foot-cell {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  text-align: center;
+  padding: 9px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -8px 10px -10px rgba(0, 0, 0, 0.35);
+}
 .data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .data-table th {
   position: sticky;

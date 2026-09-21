@@ -3623,8 +3623,8 @@ async function runTableDiff() {
     }
     if (!rows.length) tbody.appendChild(el(`<tr><td colspan="4" style="text-align:center;color:var(--text-3);padding:14px">两侧均未解析出字段</td></tr>`));
     table.appendChild(tbody);
-    // 底部附建表语句对比入口
-    const foot = el(`<tr><td colspan="4" style="text-align:center;padding:8px"><button class="button small" id="diff-open-side">${icon('eye')} 查看完整建表语句</button></td></tr>`);
+    // 底部附建表语句对比入口（吸底固定，滚动时始终可见）
+    const foot = el(`<tr><td colspan="4" class="diff-foot-cell"><button class="button small" id="diff-open-side">${icon('eye')} 查看完整建表语句</button></td></tr>`);
     tbody.appendChild(foot);
     tbody.querySelector('#diff-open-side').addEventListener('click', () => showSideBySide(ta, tb, ca.raw, cb.raw, `${ia}/${da}`, `${ib}/${dbb}`));
     toast(diffCount ? `字段级差异 ${diffCount} 项（共 ${rows.length} 字段）` : '两张表字段完全一致', diffCount ? 'info' : 'success');
