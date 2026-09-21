@@ -76,6 +76,14 @@ async function detect() {
       message(`检测到当前页是 Archery（${origin}），已自动采用该地址。`);
       return detect(); // 地址就位，重走完整检测流程
     }
+    // 当前页不是：看浏览历史里 content script 发现过的 Archery 候选地址（后台已验证 /login/ 特征）
+    const { archeryCandidates } = await chrome.storage.local.get({ archeryCandidates: [] });
+    const hit = archeryCandidates[0];
+    if (hit?.origin) {
+      await saveConfig({ baseUrl: hit.origin });
+      message(`根据你浏览过的页面检测到 Archery（${hit.origin}），已自动采用；登录该 Archery 后即可直接使用。`);
+      return detect();
+    }
     $('#popup-code').textContent = '首次使用：填写你的 Archery 地址';
     setStatus(false, '未配置');
     message('当前页不是 Archery。展开「自动重登凭证」填写 Archery 地址（如 http://archery.example.com:9123）保存，或先在浏览器打开 Archery 页面再点开本弹窗自动识别。', true);

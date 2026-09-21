@@ -1,5 +1,10 @@
 # 更新日志
 
+## 1.2.3（2026-09-21）
+
+- Archery 地址自动发现（双通道，不写死任何域名）：① 页面特征——content script 在所有页面与 iframe 中识别 Archery 登录页特征并上报 origin；② 接口推测——webRequest 观察浏览器请求，命中 Archery 独有接口路径（/authenticate/、/instance_resource/、/user_all_instances/ 等）即提取 origin，覆盖「其他网页 iframe 嵌入 Archery」场景
+- 候选 origin 由后台 GET /login/ 验证 Archery 页面特征后保存（最多 5 个，只存 origin 不收集页面内容）；扩展未配置地址时，弹窗与工作台自动采用候选——在该 Archery 登录后 cookie 落地即可直接使用
+
 ## 1.2.2（2026-09-21）
 
 - 索引完全改为手动：去掉首次自动弹初始化选择器、过期提醒等一切自动触发；唯一入口为数据浏览器刷新按钮 →「重构搜索索引」（或命令面板）

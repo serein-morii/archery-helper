@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Archery 助手",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "minimum_chrome_version": "120",
   "description": "Archery SQL 工作台：数据库对象浏览、多次查询结果保留、SQL 审核检测、工单查询与数据导出。",
   "permissions": [
@@ -9,7 +9,8 @@
     "cookies",
     "tabs",
     "declarativeNetRequest",
-    "unlimitedStorage"
+    "unlimitedStorage",
+    "webRequest"
   ],
   "host_permissions": [
     "http://*/*",
@@ -32,6 +33,19 @@
   "background": {
     "service_worker": "sw.js"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "js/detector.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",

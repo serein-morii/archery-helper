@@ -173,6 +173,15 @@ async function init() {
   applyTheme();
   metaIndex.load(); // 本地对象索引后台加载，供顶部搜索
   state.cfg = await loadConfig();
+  // 未配置地址：采用 content script 浏览时发现并验证过的 Archery 候选（后台 /login/ 特征已确认）
+  if (!state.cfg.baseUrl) {
+    try {
+      const { archeryCandidates } = await chrome.storage.local.get({ archeryCandidates: [] });
+      if (archeryCandidates[0]?.origin) {
+        state.cfg = await saveConfig({ baseUrl: archeryCandidates[0].origin });
+      }
+    } catch { /* 候选读取失败则走未配置引导 */ }
+  }
   state.api = new ArcheryApi(state.cfg);
   $('#server-label').textContent = state.cfg.baseUrl.replace(/^https?:\/\//, '');
   $('#user-name').textContent = state.cfg.username || '浏览器会话';
