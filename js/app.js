@@ -226,13 +226,14 @@ async function connect() {
     buildInstanceSelectors();
     buildTree();
     restoreDraft();
-    // 连接成功后：完全没有索引时才自动后台重建一次（实例多较慢，有进度不阻塞）；过期只提醒手动重构
+    // 连接成功后：完全没有索引时（首次使用）弹出范围选择器让用户勾选需要初始化的实例——一般用不到全部；
+    // 过期只提醒手动重构
     metaIndex.load().then(() => {
       const empty = !Object.keys(metaIndex.data.dbs).length;
       const stale = Date.now() - (metaIndex.data.updatedAt || 0) > META_INDEX_TTL;
       if (empty && state.instances.length) {
-        toast('首次使用：正在后台建立全库搜索索引（可能需要几分钟），完成后可在数据浏览器搜索框搜全部表名', 'info');
-        runFullIndexBuild();
+        toast('首次使用：请选择需要初始化搜索索引的范围（建议只勾常用实例，之后可随时增量更新）', 'info');
+        confirmRebuildIndex({ firstRun: true });
       } else if (stale && state.instances.length) {
         toast('搜索索引已超过 7 天，如需最新表清单可点数据浏览器刷新按钮 →「重构搜索索引」', 'info');
       }
@@ -828,7 +829,7 @@ $('#refresh-tree').addEventListener('click', () => {
 });
 
 /** 重构索引：范围选择器（树形到库级；部分=增量更新，全选=完全重建） */
-function confirmRebuildIndex() {
+function confirmRebuildIndex({ firstRun = false } = {}) {
   if (indexBuilding) {
     setIndexProgress(true);
     const txt = $('#index-progress-text')?.textContent || '';
@@ -843,8 +844,10 @@ function confirmRebuildIndex() {
     }
     const body = el(`<div class="idx-picker">
       <p class="idxp-desc">
-        勾选<b>实例</b> = 更新该实例全部库；单独勾<b>库</b> = 只更新该库（其余索引保留，<b>增量更新</b>）。<br />
-        点「全选」= <b>完全重建</b>（清空后拉取全部实例，耗时较长）。
+        ${firstRun
+          ? `首次使用：勾选<b>需要初始化</b>的类型 / 实例 / 库（建议只勾常用实例，一般用不到全部）。<br />索引只拉「库 + 表」清单、不拉字段与详情；之后可随时从刷新按钮增量更新。`
+          : `勾选<b>实例</b> = 更新该实例全部库；单独勾<b>库</b> = 只更新该库（其余索引保留，<b>增量更新</b>）。<br />
+        点「全选」= <b>完全重建</b>（清空后拉取全部实例，耗时较长）。`}
       </p>
       <div class="idx-picker-bar">
         <button class="button small" id="idxp-all">${icon('check')}<span>全选（完全重建）</span></button>
@@ -998,7 +1001,7 @@ function confirmRebuildIndex() {
       closeModal();
       runIndexUpdate(insSel, dbSel, { wipe: isFullSelection() });
     });
-    openModal('重构搜索索引 · 选择范围', body, { wide: true });
+    openModal(firstRun ? '初始化搜索索引 · 选择范围' : '重构搜索索引 · 选择范围', body, { wide: true });
   });
 }
 

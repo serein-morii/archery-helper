@@ -1,6 +1,6 @@
 # Archery 助手（Chrome/Edge 扩展）
 
-> 当前版本 **1.2.0**，更新日志见 [CHANGELOG.md](CHANGELOG.md)（插件内：设置 → 更新日志）。
+> 当前版本 **1.2.1**，更新日志见 [CHANGELOG.md](CHANGELOG.md)（插件内：设置 → 更新日志）。
 
 为 [Archery](https://github.com/hhyo/Archery)（v1.9.1）打造的 SQL 工作台 Chrome/Edge 扩展。
 
