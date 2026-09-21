@@ -2030,3 +2030,18 @@ input[type='checkbox'] { accent-color: var(--brand); width: 15px; height: 15px; 
   border-radius: 5px;
   padding: 1px 5px;
 }
+
+/* ---------- 索引选择器警告块 ---------- */
+.idxp-warn {
+  display: flex;
+  gap: 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--border));
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.75;
+}
+.idxp-warn .icon { width: 16px; height: 16px; flex: none; margin-top: 3px; }
+.idxp-warn b { color: var(--warn); }

@@ -794,7 +794,7 @@ $('#refresh-tree').addEventListener('click', () => {
       <button class="button favpick" id="rp-refresh">${icon('refresh')}<span><b>刷新实例与对象</b><small>重新拉取实例列表并刷新对象树（轻量，随时可点）</small></span></button>
       ${indexBuilding
         ? `<button class="button favpick" id="rp-index-warn" style="border-color:var(--danger)">${icon('alert')}<span><b style="color:var(--danger)">索引重建中，请勿重复拉取</b><small id="rp-warn-sub">进度见数据浏览器，请等待完成</small></span></button>`
-        : `<button class="button favpick" id="rp-index">${icon('search')}<span><b>重构搜索索引</b><small>选择范围后拉取最新「库+表」清单，供全库搜索</small></span></button>`}
+        : `<button class="button favpick" id="rp-index" style="border-color:color-mix(in srgb, var(--warn) 55%, var(--border))">${icon('alert')}<span><b style="color:var(--warn)">重构搜索索引（重资源操作）</b><small>仅为搜索框搜表名服务；会逐实例拉取库表清单、消耗服务端资源，无搜索需求不建议使用</small></span></button>`}
     </div>
   </div>`);
   body.querySelector('#rp-refresh').addEventListener('click', async () => {
@@ -831,9 +831,14 @@ function confirmRebuildIndex() {
       known.get(e.instance).push(e.db);
     }
     const body = el(`<div class="idx-picker">
+      <div class="idxp-warn">${icon('alert')}<div>
+          <b>如无「搜索框搜表名」的需求，不建议重建索引，请直接点「取消」。</b><br />
+          · 索引<b>只服务于搜索框搜表名</b>，对象树浏览、查询、补全等全部功能<b>不依赖索引</b>，不建索引零影响<br />
+          · 重建会<b>逐实例拉取库表清单</b>，实例多时对 Archery 服务端有明显压力<br />
+          · 「全选 = 完全重建」最重，<b>请勿频繁操作</b>；日常建议只增量勾选需要的实例/库
+        </div></div>
       <p class="idxp-desc">
-        <b style="color:var(--warn)">索引仅为「搜索框搜表名」服务，如无此需求不建议重建</b>——重建会逐实例拉取库表清单、消耗服务端资源；对象树浏览与查询不依赖索引，完全不受影响。<br /><br />
-        勾选<b>实例</b> = 更新该实例全部库；单独勾<b>库</b> = 只更新该库（其余索引保留，<b>增量更新</b>）；「全选」= <b>完全重建</b>（清空后拉取全部，耗时较长）。只拉「库 + 表」清单，不拉字段与详情。
+        勾选<b>实例</b> = 更新该实例全部库；单独勾<b>库</b> = 只更新该库（其余索引保留，<b>增量更新</b>）；「全选」= <b>完全重建</b>。只拉「库 + 表」清单，不拉字段与详情。
       </p>
       <div class="idx-picker-bar">
         <div class="search-field" style="flex:1;min-width:160px;height:30px">
@@ -4705,7 +4710,7 @@ function paletteActions() {
     { group: '功能', icon: 'refresh', label: '重新连接', run: () => connect() },
     indexBuilding
       ? { group: '功能', icon: 'alert', label: '索引重建中，请勿重复拉取', sub: '进度见数据浏览器', run: () => { setIndexProgress(true); toast(`索引重建进行中（${$('#index-progress-text')?.textContent || '进行中'}），请勿重复拉取`, 'error'); } }
-      : { group: '功能', icon: 'search', label: '重构搜索索引', sub: '全实例库表缓存，供搜表名', run: () => confirmRebuildIndex() },
+      : { group: '功能', icon: 'search', label: '重构搜索索引', sub: '重资源操作，无搜索需求不建议使用', run: () => confirmRebuildIndex() },
   ];
 }
 
