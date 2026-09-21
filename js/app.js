@@ -1246,6 +1246,7 @@ async function poolRun(items, limit, worker) {
 }
 
 /** 索引进度条（侧边栏）：visible + 文案 + 百分比 */
+let indexBuilding = false; // 索引重建进行中标记（防重复拉取）
 function setIndexProgress(visible, text, pct) {
   const bar = $('#index-progress');
   if (!bar) return;
