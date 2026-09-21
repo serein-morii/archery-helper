@@ -171,6 +171,7 @@ function showAuthBanner(reason) {
 
 async function init() {
   applyTheme();
+  metaIndex.load(); // 本地对象索引后台加载，供顶部搜索
   state.cfg = await loadConfig();
   state.api = new ArcheryApi(state.cfg);
   $('#server-label').textContent = state.cfg.baseUrl.replace(/^https?:\/\//, '');
@@ -398,6 +399,7 @@ $('#db-name').addEventListener('change', (e) => {
   state.current.schema = '';
   saveDraft();
   preloadTables();
+  indexDbLazy(state.current.instance, e.target.value); // 静默补充搜索索引（含字段）
   if (state.current.instance && e.target.value) {
     const ins = state.instances.find((i) => i.instance_name === state.current.instance);
     if (ins?.db_type === 'pgsql') loadSchemas();
@@ -535,6 +537,22 @@ function dbNode(ins, dbName) {
         label: '导出数据字典（Markdown）',
         icon: 'download',
         action: () => exportDataDict(typeof ins === 'string' ? ins : ins.name || ins.instance_name, dbName),
+      },
+      {
+        label: '重建该库搜索索引（含字段）',
+        icon: 'search',
+        action: async () => {
+          const insName = typeof ins === 'string' ? ins : ins.name || ins.instance_name;
+          setIndexProgress(true, `索引：${insName}/${dbName}`);
+          try {
+            await indexDb(insName, dbName, { withColumns: true });
+            setIndexProgress(false);
+            toast(`已索引 ${insName}/${dbName}（顶部搜索可搜该库表和字段）`, 'success');
+          } catch (e) {
+            setIndexProgress(false);
+            toast(`索引失败：${e.message}`, 'error');
+          }
+        },
       },
       {
         label: '复制库名',
@@ -765,6 +783,137 @@ async function preloadTables() {
     /* 静默失败，右键/树仍可用 */
   }
 }
+
+/* ======================= 对象搜索索引（本地缓存，供命令面板搜表/字段） =======================
+ * 结构：{ version, updatedAt, dbs: { "<instance>|<db>": { instance, db, tables: { 表名: [字段...] }, updatedAt } } }
+ * - 查询某库时静默增量更新（含字段，information_schema 一次拉全库）
+ * - 手动全量重建：所有实例的库表清单（已有字段的库保留字段），带进度
+ * - 库右键可单独重建（含字段） */
+const META_INDEX_KEY = 'meta-index';
+const META_INDEX_TTL = 7 * 24 * 3600 * 1000; // 查过的库 7 天后自动重建
+const metaIndex = {
+  data: { version: 1, updatedAt: 0, dbs: {} },
+  loaded: false,
+  async load() {
+    if (this.loaded) return;
+    try {
+      const o = await chrome.storage.local.get({ [META_INDEX_KEY]: null });
+      if (o[META_INDEX_KEY]?.dbs) this.data = o[META_INDEX_KEY];
+      this.loaded = true;
+    } catch { /* 隐身等场景静默降级为内存索引 */ }
+  },
+  async save() {
+    try {
+      await chrome.storage.local.set({ [META_INDEX_KEY]: this.data });
+    } catch { /* 超限等场景静默：内存索引仍可用 */ }
+  },
+  key(instance, db) { return `${instance}|${db}`; },
+  entry(instance, db) { return this.data.dbs[this.key(instance, db)]; },
+};
+
+/** information_schema 一次拉全库字段（仅 MySQL / TiDB） */
+async function fetchDbColumns(instance, db) {
+  const ins = state.instances.find((i) => i.instance_name === instance);
+  if (!['mysql', 'tidb'].includes(ins?.db_type || 'mysql')) return {};
+  const escDb = db.replace(/'/g, "''");
+  const res = await state.api.query({
+    instanceName: instance,
+    dbName: db,
+    sqlContent: `select table_name, column_name from information_schema.columns where table_schema='${escDb}'`,
+    limitNum: 20000,
+  });
+  if (res.status !== 0) throw new Error(res.msg || '字段查询失败');
+  const map = {};
+  for (const [tb, col] of res.data?.rows || []) (map[tb] ??= []).push(col);
+  return map;
+}
+
+/** 建立单个库的索引；withColumns 时附全库字段 */
+async function indexDb(instance, db, { withColumns = false } = {}) {
+  const t = await state.api.tables(instance, db, '');
+  if (t.status !== 0) throw new Error(t.msg || '表清单获取失败');
+  const tables = {};
+  for (const name of t.data || []) tables[name] = [];
+  if (withColumns) {
+    try {
+      const cols = await fetchDbColumns(instance, db);
+      for (const [tb, list] of Object.entries(cols)) (tables[tb] ??= []).push(...list);
+    } catch { /* 字段失败不阻塞表级索引 */ }
+  }
+  metaIndex.data.dbs[metaIndex.key(instance, db)] = { instance, db, tables, updatedAt: Date.now() };
+  await metaIndex.save();
+}
+
+/** 查询库时静默增量更新（无索引或已过期才拉，不影响现有流程） */
+async function indexDbLazy(instance, db) {
+  if (!instance || !db) return;
+  await metaIndex.load();
+  const e = metaIndex.entry(instance, db);
+  if (e && Date.now() - e.updatedAt < META_INDEX_TTL) return;
+  try {
+    await indexDb(instance, db, { withColumns: true });
+  } catch { /* 静默：索引失败不影响查询 */ }
+}
+
+/** 全量重建：所有实例 → 所有库的表清单；进度回调 (done, total, text) */
+let indexBuilding = false;
+async function rebuildFullIndex(onProgress) {
+  if (indexBuilding) throw new Error('索引正在重建中，请稍候');
+  indexBuilding = true;
+  try {
+    await metaIndex.load();
+    const instances = state.instances.filter((i) => ['mysql', 'tidb'].includes(i.db_type));
+    let total = 0, done = 0;
+    const allPairs = [];
+    for (const ins of instances) {
+      try {
+        const res = await state.api.databases(ins.instance_name);
+        if (res.status !== 0) continue;
+        for (const db of res.data || []) allPairs.push([ins.instance_name, db]);
+      } catch { /* 单实例失败跳过 */ }
+    }
+    total = allPairs.length;
+    if (!total) throw new Error('没有可索引的库（需要 MySQL / TiDB 实例）');
+    for (const [instance, db] of allPairs) {
+      done += 1;
+      onProgress?.(done, total, `${instance}/${db}`);
+      try {
+        await indexDb(instance, db, { withColumns: false });
+      } catch { /* 单库失败继续 */ }
+      await new Promise((r) => setTimeout(r, 30)); // 轻微限速，避免打挂服务端
+    }
+    metaIndex.data.updatedAt = Date.now();
+    await metaIndex.save();
+    return { total };
+  } finally {
+    indexBuilding = false;
+  }
+}
+
+/** 索引进度条（侧边栏） */
+function setIndexProgress(visible, text) {
+  const bar = $('#index-progress');
+  if (!bar) return;
+  bar.hidden = !visible;
+  if (text) $('#index-progress-text').textContent = text;
+}
+
+async function runFullIndexBuild() {
+  if (!state.instances.length) return toast('请先连接 Archery（等待实例列表加载）', 'error');
+  setIndexProgress(true, '正在拉取库清单…');
+  try {
+    const { total } = await rebuildFullIndex((done, t, name) => {
+      setIndexProgress(true, `索引 ${done}/${t}：${name}`);
+    });
+    setIndexProgress(false);
+    toast(`搜索索引已重建：${total} 个库（查询过的库自动补充字段）`, 'success');
+  } catch (e) {
+    setIndexProgress(false);
+    toast(`索引重建失败：${e.message}`, 'error');
+  }
+}
+$('#rebuild-index').addEventListener('click', runFullIndexBuild);
+
 async function suggestItems({ table, prefix }) {
   if (table) {
     table = table.replace(/`/g, '');
@@ -1630,6 +1779,38 @@ function updateExportButtons() {
 }
 
 /* ======================= 导出 ======================= */
+/** Excel 2003 SpreadsheetML（.xls，Excel 原生支持多 Worksheet）：数据 sheet + 导出信息 sheet */
+function buildXlsXml(columns, rows, meta) {
+  const esc = (v) =>
+    String(v ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;')
+      .replace(/\n/g, '&#10;');
+  const cellXml = (v) => {
+    if (v === null || v === undefined || v === '') return '<Cell/>';
+    if (typeof v === 'number' && isFinite(v)) return `<Cell><Data ss:Type="Number">${v}</Data></Cell>`;
+    return `<Cell><Data ss:Type="String">${esc(v)}</Data></Cell>`;
+  };
+  const headCell = (v) => `<Cell ss:StyleID="h"><Data ss:Type="String">${esc(v)}</Data></Cell>`;
+  const sheet = (name, trs) => `<Worksheet ss:Name="${esc(name)}"><Table>${trs}</Table></Worksheet>`;
+  const dataRows =
+    `<Row>${columns.map(headCell).join('')}</Row>` +
+    rows.map((row) => `<Row>${row.map(cellXml).join('')}</Row>`).join('');
+  const infoRows = meta.map(([k, v]) => `<Row>${headCell(k)}${cellXml(v)}</Row>`).join('');
+  return (
+    `<?xml version="1.0"?>\n<?mso-application progid="Excel.Sheet"?>\n` +
+    `<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">\n` +
+    ` <Styles><Style ss:ID="h"><Font ss:Bold="1"/></Style></Styles>\n` +
+    sheet('查询结果', dataRows) +
+    '\n' +
+    sheet('导出信息', infoRows) +
+    '\n</Workbook>'
+  );
+}
+
 function exportActive(type) {
   const r = activeResultData();
   if (!r || r.kind !== 'query' || !r.rows?.length) return toast('当前没有可导出的查询结果', 'error');
@@ -1657,11 +1838,17 @@ function exportActive(type) {
     const objs = data.map((row) => Object.fromEntries(r.columns.map((c, i) => [c, row[i]])));
     download(`${name}.json`, JSON.stringify(objs, null, 2), 'application/json');
   } else if (type === 'excel') {
-    const cell = (v) => `<td>${escapeHtml(v ?? '')}</td>`;
-    const html = `<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body>
-      <table border="1"><thead><tr>${r.columns.map((c) => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
-      <tbody>${data.map((row) => `<tr>${row.map(cell).join('')}</tr>`).join('')}</tbody></table></body></html>`;
-    download(`${name}.xls`, html, 'application/vnd.ms-excel');
+    const meta = [
+      ['SQL', r.sql || ''],
+      ['实例 / 库', r.target || ''],
+      ['导出行数', data.length],
+      ['结果总行数', r.rows.length],
+      ['列数', r.columns.length],
+      ['查询耗时', r.queryTime ? `${r.queryTime}s` : '—'],
+      ['导出时间', new Date().toLocaleString('zh-CN')],
+      ['导出自', `Archery 助手 v${chrome.runtime.getManifest().version}`],
+    ];
+    download(`${name}.xls`, buildXlsXml(r.columns, data, meta), 'application/vnd.ms-excel');
   }
   toast(`已导出 ${data.length} 行`, 'success');
   exportUnlocked = false;
@@ -4066,6 +4253,22 @@ async function restoreDraft() {
 /* ======================= 命令面板（Ctrl+K） ======================= */
 const palette = { open: false, items: [], index: 0 };
 
+/** 从索引命中跳转：切实例/库后查看表结构 */
+async function jumpToTable(instance, db, table) {
+  switchView('query');
+  const insSel = $('#instance-name');
+  if (instance && [...insSel.options].some((o) => o.value === instance) && insSel.value !== instance) {
+    setSelectValue(insSel, instance);
+    await onInstanceChange(instance);
+  }
+  const dbSel = $('#db-name');
+  if (db && [...dbSel.options].some((o) => o.value === db) && dbSel.value !== db) {
+    setSelectValue(dbSel, db);
+    preloadTables();
+  }
+  describeTable(instance, db, table);
+}
+
 function paletteActions() {
   return [
     { group: '功能', icon: 'code', label: 'SQL 工作台', sub: '查询', run: () => switchView('query') },
@@ -4078,6 +4281,7 @@ function paletteActions() {
     { group: '功能', icon: 'sun', label: '切换深浅主题', run: () => $('#theme-toggle').click() },
     { group: '功能', icon: 'settings', label: '设置', run: () => $('#settings-open').click() },
     { group: '功能', icon: 'refresh', label: '重新连接', run: () => connect() },
+    { group: '功能', icon: 'search', label: '重建搜索索引', sub: '全实例库表缓存，供搜表/搜字段', run: () => runFullIndexBuild() },
   ];
 }
 
@@ -4135,6 +4339,44 @@ function paletteCandidates(kw) {
         },
       });
     }
+  }
+  // 索引搜索：全库的表与字段（关键字 ≥2 字才遍历索引，限量输出）
+  if (kw.length >= 2) {
+    const tables = [];
+    const columns = [];
+    const seenTable = new Set();
+    for (const entry of Object.values(metaIndex.data.dbs)) {
+      if (tables.length >= 12 && columns.length >= 12) break;
+      const env = `${entry.instance}/${entry.db}`;
+      for (const [tb, cols] of Object.entries(entry.tables)) {
+        if (match(tb)) {
+          if (!seenTable.has(env + tb) && tables.length < 12) {
+            seenTable.add(env + tb);
+            tables.push({
+              group: '表（索引）',
+              icon: 'table',
+              label: tb,
+              mono: true,
+              sub: env,
+              run: () => jumpToTable(entry.instance, entry.db, tb),
+            });
+          }
+        } else if (columns.length < 12) {
+          const hit = cols.find((c) => c && c.toLowerCase().includes(lower));
+          if (hit) {
+            columns.push({
+              group: '字段（索引）',
+              icon: 'key',
+              label: hit,
+              mono: true,
+              sub: `${entry.db}.${tb}`,
+              run: () => jumpToTable(entry.instance, entry.db, tb),
+            });
+          }
+        }
+      }
+    }
+    out.push(...tables, ...columns);
   }
   // 本地最近执行（草稿 tab + 最近结果 SQL）
   const recent = [
