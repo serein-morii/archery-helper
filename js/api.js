@@ -78,6 +78,17 @@ export async function loadConfig() {
 export async function saveConfig(patch) {
   const cfg = { ...(await loadConfig()), ...patch };
   await chrome.storage.local.set({ archeryConfig: cfg });
+  // 手动保存过的地址纳入「已知地址」列表（供弹窗候选与工作台切换），去重置顶
+  if (cfg.baseUrl) {
+    try {
+      const { archeryCandidates } = await chrome.storage.local.get({ archeryCandidates: [] });
+      const list = [
+        { origin: cfg.baseUrl, at: Date.now(), source: 'manual' },
+        ...archeryCandidates.filter((c) => c.origin !== cfg.baseUrl),
+      ].slice(0, 8);
+      await chrome.storage.local.set({ archeryCandidates: list });
+    } catch { /* 候选记录失败不影响配置保存 */ }
+  }
   return cfg;
 }
 
@@ -412,13 +423,18 @@ export class ArcheryApi {
    * （group_id/group_name）与可上线（can_write）实例及其 id。
    */
   async submitContext() {
-    const resp = await fetch(this.url('/submitsql/'), { credentials: 'include' });
+    const resp = await fetch(this.url('/submitsql/'), { credentials: 'include', signal: AbortSignal.timeout(20000) });
     const html = await resp.text();
     const doc = new DOMParser().parseFromString(html, 'text/html');
+    // 会话过期时服务端返回登录页（含密码框）：解析会得到空列表，必须明确报错而不是静默
+    if (doc.querySelector('input[name="password"]')) {
+      throw new ArcheryApiError('获取资源组失败：Archery 会话已过期，请重新登录后再检测提交', { needLogin: true });
+    }
     const groups = [...doc.querySelectorAll('#group_name option')].map((o) => ({
       groupId: o.value,
       groupName: o.textContent.trim(),
-    }));
+    })).filter((g) => g.groupId !== '');
+    if (!groups.length) throw new ArcheryApiError('未获取到资源组：账号可能没有上线工单权限，或 Archery 页面结构变化');
     const instances = [...doc.querySelectorAll('#instance_name option[instance-id]')].map((o) => ({
       id: o.getAttribute('instance-id'),
       instanceName: o.value,

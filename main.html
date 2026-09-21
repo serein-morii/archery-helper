@@ -15,7 +15,7 @@
         <span class="version" id="app-version"></span>
       </a>
       <span class="header-divider"></span>
-      <span class="header-location" id="server-label">SQL 工作台</span>
+      <span class="header-location" id="server-label" title="点击切换 Archery 地址">SQL 工作台</span>
       <div class="header-end">
         <button class="header-search" id="header-search" title="全局搜索：功能 / 实例 / 库 / 表 / 最近 SQL（Ctrl+K）">
           <span data-icon="search"></span><span class="header-search-label">搜索…</span><kbd>Ctrl K</kbd>
@@ -172,6 +172,7 @@
               <span data-icon="info" style="flex:none;margin-top:1px"></span>
               <div class="banner-main">
                 <div id="auth-banner-text">未登录或会话过期。</div>
+              <div id="banner-candidates"></div>
                 <div class="banner-form">
                   <input id="banner-user" type="text" placeholder="用户名" autocomplete="off" />
                   <input id="banner-pass" type="password" placeholder="密码" autocomplete="new-password" />

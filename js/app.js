@@ -161,29 +161,54 @@ function setConnection(ok, text) {
 }
 
 /** 连接失败时展示原因 + 页面内登录表单 */
+let pendingCandidates = null; // 未配置时待选择的 Archery 候选地址
+
 function showAuthBanner(reason) {
   $('#auth-banner-text').textContent = reason;
   $('#banner-user').value = state.cfg?.username || '';
   $('#banner-pass').value = state.cfg?.password || '';
   $('#banner-totp').value = state.cfg?.totpSecret || '';
   $('#auth-banner').hidden = false;
+  // 有候选地址时在横幅内列出供点选采用
+  const candBox = $('#banner-candidates');
+  if (!candBox) return;
+  candBox.replaceChildren();
+  if (pendingCandidates?.length) {
+    const title = el('<div style="font-size:11px;font-weight:700;color:var(--text-3);margin-bottom:4px">检测到以下 Archery 地址，点选使用：</div>');
+    candBox.appendChild(title);
+    for (const c of pendingCandidates) {
+      const btn = el(`<button class="button small" style="margin:0 6px 6px 0">${icon('database')}<span>${escapeHtml(c.origin.replace(/^https?:\/\//, ''))}</span></button>`);
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try {
+          state.cfg = await saveConfig({ baseUrl: c.origin });
+          toast(`已选择 ${c.origin}，正在连接…`, 'info');
+          await init();
+        } catch (e) {
+          toast(`切换失败：${e.message}`, 'error');
+          btn.disabled = false;
+        }
+      });
+      candBox.appendChild(btn);
+    }
+  }
 }
 
 async function init() {
   applyTheme();
   metaIndex.load(); // 本地对象索引后台加载，供顶部搜索
   state.cfg = await loadConfig();
-  // 未配置地址：采用 content script 浏览时发现并验证过的 Archery 候选（后台 /login/ 特征已确认）
+  // 未配置地址：在登录横幅里列出候选 Archery 地址让用户点选（可能不止一个）
   if (!state.cfg.baseUrl) {
     try {
       const { archeryCandidates } = await chrome.storage.local.get({ archeryCandidates: [] });
-      if (archeryCandidates[0]?.origin) {
-        state.cfg = await saveConfig({ baseUrl: archeryCandidates[0].origin });
+      if (archeryCandidates.length) {
+        pendingCandidates = archeryCandidates;
       }
     } catch { /* 候选读取失败则走未配置引导 */ }
   }
   state.api = new ArcheryApi(state.cfg);
-  $('#server-label').textContent = state.cfg.baseUrl.replace(/^https?:\/\//, '');
+  $('#server-label').textContent = state.cfg.baseUrl.replace(/^https?:\/\//, '') || 'SQL 工作台';
   $('#user-name').textContent = state.cfg.username || '浏览器会话';
   $('#avatar').innerHTML = icon('user');
   let hasSession = false;
@@ -258,6 +283,39 @@ async function connect() {
   }
 }
 $('#retry-connect').addEventListener('click', connect);
+
+/* 顶栏地址标签：点击弹出已知 Archery 地址一键切换（自动发现 + 手动保存过的） */
+$('#server-label').addEventListener('click', async (e) => {
+  e.stopPropagation();
+  let candidates = [];
+  try {
+    const { archeryCandidates } = await chrome.storage.local.get({ archeryCandidates: [] });
+    candidates = archeryCandidates;
+  } catch { /* 读取失败按无候选处理 */ }
+  if (!candidates.length) {
+    return toast('暂无已知地址：在浏览器打开 Archery 自动发现，或在设置里手动填写保存', 'info');
+  }
+  const cur = state.cfg?.baseUrl;
+  const r = e.currentTarget.getBoundingClientRect();
+  showContextMenu(
+    r.left,
+    r.bottom + 4,
+    candidates.map((c) => ({
+      label: `${c.origin === cur ? '✓ ' : ''}${c.origin.replace(/^https?:\/\//, '')}${c.source === 'manual' ? '' : '（自动发现）'}`,
+      icon: 'database',
+      action: async () => {
+        if (c.origin === cur) return;
+        try {
+          state.cfg = await saveConfig({ baseUrl: c.origin });
+          toast(`已切换到 ${c.origin}，正在连接…`, 'info');
+          await init();
+        } catch (err) {
+          toast(`切换失败：${err.message}`, 'error');
+        }
+      },
+    }))
+  );
+});
 
 /* 横幅内登录：账号密码 →（若需 2FA）动态验证码 → 重连 */
 let pendingTwoFa = null; // {sessionKey}
@@ -3022,7 +3080,7 @@ function renderLogTable(tableEl, rows) {
     tr.innerHTML = `
       <td>${escapeHtml(row.create_time)}</td>
       <td title="${escapeHtml(row.instance_name)}">${escapeHtml(row.instance_name)}<br><span style="color:var(--text-3)">${escapeHtml(row.db_name)}</span></td>
-      <td class="sql-cell clamp" title="点击展开/收起完整 SQL">${escapeHtml(row.sqllog)}</td>
+      <td class="sql-cell clamp" title="点击展开/收起完整 SQL">${escapeHtml(row.sqllog)}<button class="icon-button mini sql-copy" title="复制 SQL">${icon('copy')}</button></td>
       <td class="num">${escapeHtml(String(row.effect_row ?? ''))}</td>
       <td class="num">${escapeHtml(String(row.cost_time ?? ''))}s</td>
       <td>${escapeHtml(row.user_display)}</td>
@@ -3036,7 +3094,7 @@ function renderLogTable(tableEl, rows) {
       const cell = tr.querySelector('.sql-cell');
       cell.classList.toggle('clamp');
     });
-    tr.querySelector('[data-act="fill"]').addEventListener('click', () => fillFromLog(row));
+    tr.querySelector('.sql-copy')?.addEventListener('click', (e) => { e.stopPropagation(); navigator.clipboard.writeText(row.sqllog || ''); toast('已复制 SQL', 'success'); });('click', () => fillFromLog(row));
     tr.querySelector('[data-act="run"]').addEventListener('click', () => fillFromLog(row, true));
     tr.querySelector('[data-act="star"]').addEventListener('click', async () => {
       try {
@@ -3253,6 +3311,8 @@ function renderLocalList() {
           ${item.cloudLogId
             ? `<button class="button small" data-act="cloud-off" title="从 Archery 收藏移除，本地保留">${icon('star')}取消云端</button>`
             : `<button class="button small" data-act="cloud-on" title="保存到 Archery 收藏，跨设备可见">${icon('upload')}${item.cloud ? '同步云端' : '存到云端'}</button>`}
+          <button class="button small" data-act="view">${icon('eye')}查看</button>
+          <button class="icon-button" data-act="copy" title="复制 SQL">${icon('copy')}</button>
           <button class="button small" data-act="edit">${icon('format')}编辑</button>
           <button class="icon-button danger" data-act="del" title="删除">${icon('trash')}</button>
         </div>
@@ -3265,6 +3325,11 @@ function renderLocalList() {
     </div>`);
     card.querySelector('.fav-card-sql').addEventListener('click', (e) => e.currentTarget.classList.toggle('open'));
     card.querySelector('[data-act="run"]').addEventListener('click', () => runLocalSql(item));
+    card.querySelector('[data-act="view"]').addEventListener('click', () => openLocalViewModal(item));
+    card.querySelector('[data-act="copy"]').addEventListener('click', () => {
+      navigator.clipboard.writeText(item.sql);
+      toast('已复制 SQL', 'success');
+    });
     card.querySelector('[data-act="edit"]').addEventListener('click', () => openLocalEditModal(item));
     card.querySelector('[data-act="cloud-on"]')?.addEventListener('click', async (e) => {
       const btn = e.currentTarget;
@@ -3304,6 +3369,26 @@ function renderLocalList() {
 }
 
 /** 编辑已保存条目：改名 / 换分组 / 改 SQL / 云端开关（勾选时保存后自动重推云端并取消旧收藏） */
+/** 查看收藏详情：大弹窗只读展示完整 SQL（含复制） */
+function openLocalViewModal(item) {
+  const body = el(`<div class="local-view">
+    <div class="lv-meta">
+      ${item.group ? `<span class="tag green">${escapeHtml(item.group)}</span>` : '<span class="tag gray">未分组</span>'}
+      ${item.cloudLogId ? '<span class="tag teal" title="已保存到 Archery 收藏">云端</span>' : ''}
+      <span class="mono">${escapeHtml(item.instance || '—')} / ${escapeHtml(item.db || '—')}</span>
+      <span style="color:var(--text-3)">${new Date(item.createdAt).toLocaleString('zh-CN')} 保存</span>
+      <button class="button small" id="lv-copy" style="margin-left:auto">${icon('copy')}<span>复制 SQL</span></button>
+    </div>
+    <pre class="lv-sql"></pre>
+  </div>`);
+  body.querySelector('.lv-sql').textContent = item.sql;
+  body.querySelector('#lv-copy').addEventListener('click', () => {
+    navigator.clipboard.writeText(item.sql);
+    toast('已复制 SQL', 'success');
+  });
+  openModal(`查看收藏 · ${item.name}`, body, { wide: true });
+}
+
 function openLocalEditModal(item) {
   const body = el(`<div>
     <label class="setting-row"><span>名称</span><input id="lfe-name" type="text" maxlength="60" value="${escapeHtml(item.name)}" /></label>
@@ -3312,7 +3397,7 @@ function openLocalEditModal(item) {
     <div class="setting-row"><span>云端</span>
       <label class="fav-check"><input type="checkbox" id="lfe-cloud" ${item.cloud ? 'checked' : ''} />同步到 Archery 收藏，跨设备可见（仅只读语句）</label>
     </div>
-    <label class="setting-row"><span>SQL</span><textarea id="lfe-sql" rows="6" style="font-family:var(--mono);font-size:12px"></textarea></label>
+    <label class="setting-row grow"><span>SQL</span><textarea id="lfe-sql" class="lf-sql-area"></textarea></label>
     <div class="setting-actions"><button class="button primary" id="lfe-save">${icon('check')}<span>保存修改</span></button></div>
   </div>`);
   const groupSel = body.querySelector('#lfe-group');
@@ -3353,7 +3438,7 @@ function openLocalEditModal(item) {
       toast(`修改已保存，但云端操作失败：${e.message}`, 'error');
     }
   });
-  openModal(`编辑收藏 · ${item.name}`, body);
+  openModal(`编辑收藏 · ${item.name}`, body, { wide: true });
 }
 
 /** 分组管理：新建 / 删除（组内条目回到未分组） */

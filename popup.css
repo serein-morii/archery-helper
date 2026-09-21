@@ -221,3 +221,42 @@
   font-size: 11px;
   background: var(--panel);
 }
+
+/* ---------- 候选地址选择 ---------- */
+.popup-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.popup-candidates .cand-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-3);
+  letter-spacing: 0.5px;
+}
+.cand-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel-2);
+  color: var(--text-1);
+  font-size: 12.5px;
+  padding: 8px 10px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.13s ease;
+  font-family: var(--mono);
+}
+.cand-btn:hover { border-color: var(--brand); background: var(--brand-softer); color: var(--brand); }
+.cand-btn .cand-tag {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-3);
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  padding: 0 6px;
+  line-height: 15px;
+  flex: none;
+}

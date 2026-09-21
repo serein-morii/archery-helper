@@ -66,7 +66,7 @@ async function verifyArcheryOrigin(origin) {
     return; // 网络不可达/证书问题：不存
   }
   if (!ok) return;
-  const list = [{ origin, at: Date.now() }, ...archeryCandidates.filter((c) => c.origin !== origin)].slice(0, 5);
+  const list = [{ origin, at: Date.now(), source: 'auto' }, ...archeryCandidates.filter((c) => c.origin !== origin)].slice(0, 8);
   await chrome.storage.local.set({ archeryCandidates: list });
 }
 
