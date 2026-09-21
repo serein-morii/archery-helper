@@ -1343,6 +1343,46 @@ body.results-expanded .editor-toolbar { display: none; }
 .button.danger:hover { filter: brightness(1.08); }
 
 
+/* ---------- 重构索引范围选择器 ---------- */
+.idx-picker { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.idxp-desc { margin: 0; font-size: 12.5px; line-height: 1.7; color: var(--text-2); }
+.idx-picker-bar { display: flex; align-items: center; gap: 8px; }
+.idxp-summary { margin-left: auto; font-size: 12px; color: var(--text-3); }
+.idx-picker-tree {
+  max-height: 340px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+  padding: 8px;
+}
+.idxp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  cursor: pointer;
+  color: var(--text-2);
+}
+.idxp-row:hover { background: var(--panel-3); }
+.idxp-row input { accent-color: var(--brand); flex: none; }
+.idxp-row .icon { width: 14px; height: 14px; color: var(--text-3); flex: none; }
+.idxp-row.idx-none { cursor: default; color: var(--text-3); font-size: 11.5px; }
+.idxp-row .caret { width: 12px; height: 12px; flex: none; opacity: 0.6; transition: transform 0.15s ease; }
+.idxp-row .count { font-size: 10px; color: var(--text-3); background: var(--panel-3); border: 1px solid var(--border); border-radius: 99px; padding: 0 6px; line-height: 16px; }
+.idxp-group-row .label { font-weight: 700; color: var(--text-1); }
+.idxp-children {
+  display: none;
+  margin-left: 18px;
+  border-left: 1px dashed var(--border);
+  padding-left: 6px;
+}
+.idxp-group.open > .idxp-children,
+.idxp-node.open > .idxp-children { display: block; }
+.idxp-row.expanded .caret { transform: rotate(90deg); }
+
 /* ---------- 搜索索引进度（侧边栏） ---------- */
 .index-progress {
   display: flex;

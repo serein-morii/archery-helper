@@ -556,7 +556,7 @@ function instanceNode(ins) {
   </div>`);
   const children = document.createElement('div');
   children.className = 'tree-children';
-  let loaded = false;
+  let loading = false;
   row.addEventListener('click', async () => {
     node.classList.toggle('open');
     row.classList.toggle('expanded');
@@ -564,8 +564,9 @@ function instanceNode(ins) {
     if ($('#instance-name').value !== ins.name) {
       await selectInstance(ins.name);
     }
-    if (node.classList.contains('open') && !loaded) {
-      loaded = true;
+    // 每次展开都实时拉取最新库清单（不用缓存）；进行中防重复点击
+    if (node.classList.contains('open') && !loading) {
+      loading = true;
       children.replaceChildren(el(`<div class="tree-empty">加载中…</div>`));
       try {
         const res = await state.api.databases(ins.name);
@@ -576,8 +577,9 @@ function instanceNode(ins) {
         }
         if (!children.children.length) children.replaceChildren(el(`<div class="tree-empty">无数据库</div>`));
       } catch (e) {
-        loaded = false;
         children.replaceChildren(el(`<div class="tree-empty">${escapeHtml(e.message)}</div>`));
+      } finally {
+        loading = false;
       }
     }
   });
@@ -629,7 +631,7 @@ function dbNode(ins, dbName) {
   });
   const children = document.createElement('div');
   children.className = 'tree-children';
-  let loaded = false;
+  let loading = false;
   row.addEventListener('click', async (e) => {
     node.classList.toggle('open');
     row.classList.toggle('expanded');
@@ -643,8 +645,9 @@ function dbNode(ins, dbName) {
     if ($('#db-name').querySelector(`option[value="${CSS.escape(dbName)}"]`) && $('#db-name').value !== dbName) {
       setSelectValue('#db-name', dbName);
     }
-    if (node.classList.contains('open') && !loaded) {
-      loaded = true;
+    // 每次展开都实时拉取最新表清单（不用缓存）；进行中防重复点击
+    if (node.classList.contains('open') && !loading) {
+      loading = true;
       children.replaceChildren(el(`<div class="tree-empty">加载中…</div>`));
       try {
         const res = await state.api.tables(ins.name, dbName);
@@ -656,8 +659,9 @@ function dbNode(ins, dbName) {
         }
         if (!tables.length) children.replaceChildren(el(`<div class="tree-empty">无表</div>`));
       } catch (e) {
-        loaded = false;
         children.replaceChildren(el(`<div class="tree-empty">${escapeHtml(e.message)}</div>`));
+      } finally {
+        loading = false;
       }
     }
   });
@@ -794,50 +798,218 @@ function highlightTreeNode(path = []) {
 }
 
 $('#tree-search').addEventListener('input', renderTree);
-/* 刷新按钮：弹出选择（刷新页面 / 重构搜索索引） */
-$('#refresh-tree').addEventListener('click', (e) => {
-  e.stopPropagation(); // 防止本次点击冒泡到全局监听立即关闭菜单
-  const r = e.currentTarget.getBoundingClientRect();
-  showContextMenu(r.right + 4, r.top, [
-    {
-      label: '刷新实例与对象',
-      icon: 'refresh',
-      action: async () => {
-        await connect();
-        toast('数据浏览器已刷新', 'success');
-      },
-    },
-    {
-      label: '重构搜索索引（全量，含字段）',
-      icon: 'search',
-      action: confirmRebuildIndex,
-    },
-  ]);
+/* 刷新按钮：中间弹窗两个选项（刷新 / 重构索引） */
+$('#refresh-tree').addEventListener('click', () => {
+  const body = el(`<div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <button class="button favpick" id="rp-refresh">${icon('refresh')}<span><b>刷新实例与对象</b><small>重新拉取实例列表并刷新对象树（轻量，随时可点）</small></span></button>
+      ${indexBuilding
+        ? `<button class="button favpick" id="rp-index-warn" style="border-color:var(--danger)">${icon('alert')}<span><b style="color:var(--danger)">索引重建中，请勿重复拉取</b><small id="rp-warn-sub">进度见数据浏览器，请等待完成</small></span></button>`
+        : `<button class="button favpick" id="rp-index">${icon('search')}<span><b>重构搜索索引</b><small>选择范围后拉取最新「库+表」清单，供全库搜索</small></span></button>`}
+    </div>
+  </div>`);
+  body.querySelector('#rp-refresh').addEventListener('click', async () => {
+    closeModal();
+    await connect();
+    toast('数据浏览器已刷新', 'success');
+  });
+  const warnBtn = body.querySelector('#rp-index-warn');
+  if (warnBtn) {
+    const t = $('#index-progress-text')?.textContent;
+    if (t) warnBtn.querySelector('#rp-warn-sub').textContent = `当前进度：${t}`;
+    warnBtn.addEventListener('click', () => toast('⚠ 索引重建进行中，请等待完成，请勿重复拉取', 'error'));
+    return openModal('数据浏览器刷新', body);
+  }
+  body.querySelector('#rp-index').addEventListener('click', () => {
+    closeModal();
+    confirmRebuildIndex();
+  });
+  openModal('数据浏览器刷新', body);
 });
 
-/** 重构索引前的耗时确认 */
+/** 重构索引：范围选择器（树形到库级；部分=增量更新，全选=完全重建） */
 function confirmRebuildIndex() {
   if (indexBuilding) {
     setIndexProgress(true);
     const txt = $('#index-progress-text')?.textContent || '';
-    return toast(`索引正在重建中${txt ? `（${txt}）` : ''}，完成后即可搜索，无需重复操作`, 'info');
+    return toast(`⚠ 索引重建进行中${txt ? `（${txt}）` : ''}，请等待完成，请勿重复拉取`, 'error');
   }
-  const body = el(`<div>
-    <p style="margin:0 0 12px;font-size:12.5px;line-height:1.7;color:var(--text-2)">
-      将遍历<b>全部实例</b>逐库拉取「库 + 表」清单建立索引（相当于把对象树全部展开的快照），供顶部搜索直接搜到<b>表名</b>。<br />
-      只拉库和表、不拉字段，开销可控；实例较多时仍需一些时间，期间可正常使用其他功能，进度显示在左侧数据浏览器。
-    </p>
-    <div class="setting-actions">
-      <button class="button" id="idx-cancel">取消</button>
-      <button class="button primary" id="idx-go">${icon('search')}<span>开始重建</span></button>
-    </div>
-  </div>`);
-  body.querySelector('#idx-cancel').addEventListener('click', closeModal);
-  body.querySelector('#idx-go').addEventListener('click', () => {
-    closeModal();
-    runFullIndexBuild();
+  metaIndex.load().then(() => {
+    // 索引里已知的 实例→库 映射（用于树形选择器展开到库级）
+    const known = new Map();
+    for (const e of Object.values(metaIndex.data.dbs)) {
+      if (!known.has(e.instance)) known.set(e.instance, []);
+      known.get(e.instance).push(e.db);
+    }
+    const body = el(`<div class="idx-picker">
+      <p class="idxp-desc">
+        勾选<b>实例</b> = 更新该实例全部库；单独勾<b>库</b> = 只更新该库（其余索引保留，<b>增量更新</b>）。<br />
+        点「全选」= <b>完全重建</b>（清空后拉取全部实例，耗时较长）。
+      </p>
+      <div class="idx-picker-bar">
+        <button class="button small" id="idxp-all">${icon('check')}<span>全选（完全重建）</span></button>
+        <button class="button small" id="idxp-none">清空选择</button>
+        <span class="idxp-summary" id="idxp-summary">未选择</span>
+      </div>
+      <div class="idx-picker-tree" id="idxp-tree"></div>
+      <div class="setting-actions">
+        <button class="button" id="idx-cancel">取消</button>
+        <button class="button primary" id="idx-go" disabled>${icon('search')}<span>开始</span></button>
+      </div>
+    </div>`);
+    const tree = body.querySelector('#idxp-tree');
+    const summary = body.querySelector('#idxp-summary');
+    const goBtn = body.querySelector('#idx-go');
+    const insBoxes = [];
+    const dbBoxes = [];
+
+    const renderPickerTree = () => {
+      // 按数据库类型分组（与对象树一致）：类型 → 实例 → 库，默认全部收起
+      const groups = new Map();
+      for (const ins of state.instances) {
+        const label = DB_TYPE_LABEL[ins.db_type] || ins.db_type || '其他';
+        if (!groups.has(label)) groups.set(label, []);
+        groups.get(label).push(ins);
+      }
+      for (const [gname, list] of groups) {
+        const gnode = el(`<div class="idxp-group"></div>`);
+        const grow = el(`<div class="idxp-row idxp-group-row" title="展开/收起">
+          <span class="caret" data-icon="right"></span>
+          <span class="icon" data-icon="folder"></span>
+          <span class="label"><b>${escapeHtml(gname)}</b></span>
+          <span class="count">${list.length}</span>
+        </div>`);
+        grow.addEventListener('click', () => {
+          gnode.classList.toggle('open');
+          grow.classList.toggle('expanded');
+        });
+        gnode.appendChild(grow);
+        const gkids = el(`<div class="idxp-children"></div>`);
+        for (const ins of list) {
+          const inode = el(`<div class="idxp-node"></div>`);
+          const irow = el(`<div class="idxp-row idxp-ins-row">
+            <span class="caret" data-icon="right" title="展开/收起"></span>
+            <input type="checkbox" data-kind="ins" title="勾选 = 更新该实例全部库">
+            <span class="icon" data-icon="database"></span>
+            <span class="label">${escapeHtml(ins.instance_name)}</span>
+          </div>`);
+          const insBox = irow.querySelector('input');
+          insBoxes.push({ box: insBox, name: ins.instance_name });
+          const ikids = el(`<div class="idxp-children"></div>`);
+          for (const db of known.get(ins.instance_name) || []) {
+            const drow = el(`<div class="idxp-row idxp-db-row">
+              <input type="checkbox" data-kind="db" title="勾选 = 只更新该库">
+              <span class="icon" data-icon="folder"></span>
+              <span class="label">${escapeHtml(db)}</span>
+            </div>`);
+            const dbBox = drow.querySelector('input');
+            dbBoxes.push({ box: dbBox, ins: ins.instance_name, db });
+            drow.addEventListener('click', (ev) => {
+              if (ev.target === dbBox) return sync(); // 直接点 checkbox：原生已切换，仅同步
+              dbBox.checked = !dbBox.checked;
+              sync();
+            });
+            ikids.appendChild(drow);
+          }
+          if (!ikids.children.length) {
+            ikids.appendChild(el(`<div class="idxp-row idxp-none">（未索引过：勾选实例将拉取其全部库）</div>`));
+          }
+          // 点箭头收起/展开；点行其他区域切换勾选（勾实例联动勾库）
+          irow.addEventListener('click', (ev) => {
+            if (ev.target.closest('.caret')) {
+              inode.classList.toggle('open');
+              irow.classList.toggle('expanded');
+              return;
+            }
+            if (ev.target === insBox) {
+              // 直接点 checkbox：原生已切换，仅联动子库
+              ikids.querySelectorAll('input[type="checkbox"]').forEach((b) => (b.checked = insBox.checked));
+              return sync();
+            }
+            insBox.checked = !insBox.checked;
+            ikids.querySelectorAll('input[type="checkbox"]').forEach((b) => (b.checked = insBox.checked));
+            sync();
+          });
+          inode.append(irow, ikids);
+          gkids.appendChild(inode);
+        }
+        gnode.appendChild(gkids);
+        tree.appendChild(gnode);
+      }
+      mountIcons(tree);
+    };
+
+    const sync = () => {
+      const insSel = insBoxes.filter((x) => x.box.checked).map((x) => x.name);
+      const dbSel = dbBoxes.filter((x) => x.box.checked);
+      // 库半选时实例框显示未勾（实例勾选=拉全库，与单独勾库是不同意图）
+      const n = insSel.length + dbSel.length;
+      summary.textContent = n ? `已选 ${insSel.length} 个实例 + ${dbSel.length} 个库` : '未选择';
+      goBtn.disabled = !n;
+      goBtn.querySelector('span').textContent = isFullSelection() ? '完全重建' : `开始更新（${n} 项）`;
+    };
+    const isFullSelection = () => insBoxes.length > 0 && insBoxes.every((x) => x.box.checked);
+
+    renderPickerTree();
+    sync();
+    body.querySelector('#idxp-all').addEventListener('click', () => {
+      [...insBoxes, ...dbBoxes].forEach((x) => (x.box.checked = true));
+      sync();
+      toast('⚠ 已全选：将执行完全重建（清空现有索引重新拉取全量），请勿频繁拉取全量', 'error');
+    });
+    body.querySelector('#idxp-none').addEventListener('click', () => {
+      [...insBoxes, ...dbBoxes].forEach((x) => (x.box.checked = false));
+      sync();
+    });
+    body.querySelector('#idx-cancel').addEventListener('click', closeModal);
+    goBtn.addEventListener('click', () => {
+      const insSel = insBoxes.filter((x) => x.box.checked).map((x) => x.name);
+      const dbSel = dbBoxes.filter((x) => x.box.checked).map((x) => [x.ins, x.db]);
+      closeModal();
+      runIndexUpdate(insSel, dbSel, { wipe: isFullSelection() });
+    });
+    openModal('重构搜索索引 · 选择范围', body, { wide: true });
   });
-  openModal('重构搜索索引', body);
+}
+
+/** 按选择更新索引：wipe=完全重建（清空后拉全部）；否则只更新选中实例/库（增量） */
+async function runIndexUpdate(insSel, dbSel, { wipe = false } = {}) {
+  if (indexBuilding) return toast('⚠ 索引重建进行中，请等待完成，请勿重复拉取', 'error');
+  if (!state.instances.length) return toast('请先连接 Archery（等待实例列表加载）', 'error');
+  setIndexProgress(true, '准备…');
+  toast(wipe ? '开始完全重建索引，进度见左侧数据浏览器' : `开始更新索引（${insSel.length} 实例 + ${dbSel.length} 库），进度见左侧数据浏览器`, 'info');
+  indexBuilding = true;
+  try {
+    await metaIndex.load();
+    if (wipe) metaIndex.data.dbs = {};
+    // 实例级：拉库清单展开为库对（带进度）
+    const pairs = [...dbSel];
+    const insList = wipe ? state.instances.map((i) => i.instance_name) : insSel;
+    let insDone = 0;
+    await poolRun(insList, 2, async (name) => {
+      const res = await state.api.databases(name);
+      insDone += 1;
+      setIndexProgress(true, `拉取实例清单 ${insDone}/${insList.length}（${Math.round((insDone / insList.length) * 100)}%）：${name}`, (insDone / insList.length) * 100);
+      if (res.status === 0) for (const db of res.data || []) pairs.push([name, db]);
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    // 库级：逐库拉表清单（带进度）
+    let done = 0;
+    await poolRun(pairs, 2, async ([instance, db]) => {
+      await indexDb(instance, db, { persist: false });
+      done += 1;
+      setIndexProgress(true, `索引 ${done}/${pairs.length}（${Math.round((done / pairs.length) * 100)}%）：${instance}/${db}`, (done / pairs.length) * 100);
+    });
+    metaIndex.data.updatedAt = Date.now();
+    await metaIndex.save();
+    setIndexProgress(false);
+    toast(`索引${wipe ? '完全重建' : '更新'}完成：${pairs.length} 个库已是最新，可搜索全部表名`, 'success');
+  } catch (e) {
+    setIndexProgress(false);
+    toast(`索引重建失败：${e.message}`, 'error');
+  } finally {
+    indexBuilding = false;
+  }
 }
 
 /* 侧边栏折叠与拖宽 */
@@ -1008,7 +1180,8 @@ async function runFullIndexBuild() {
   if (!state.instances.length) return toast('请先连接 Archery（等待实例列表加载）', 'error');
   if (indexBuilding) {
     setIndexProgress(true);
-    return toast('索引正在重建中（进度见左侧），请等待完成', 'info');
+    const txt = $('#index-progress-text')?.textContent || '';
+    return toast(`⚠ 索引重建进行中${txt ? `（${txt}）` : ''}，请等待完成，请勿重复拉取`, 'error');
   }
   setIndexProgress(true, '准备拉取…');
   toast('已开始重构搜索索引，进度见左侧数据浏览器', 'info');
@@ -4489,7 +4662,9 @@ function paletteActions() {
     { group: '功能', icon: 'sun', label: '切换深浅主题', run: () => $('#theme-toggle').click() },
     { group: '功能', icon: 'settings', label: '设置', run: () => $('#settings-open').click() },
     { group: '功能', icon: 'refresh', label: '重新连接', run: () => connect() },
-    { group: '功能', icon: 'search', label: '重构搜索索引', sub: '全实例库表缓存，供搜表名', run: () => confirmRebuildIndex() },
+    indexBuilding
+      ? { group: '功能', icon: 'alert', label: '索引重建中，请勿重复拉取', sub: '进度见数据浏览器', run: () => { setIndexProgress(true); toast(`索引重建进行中（${$('#index-progress-text')?.textContent || '进行中'}），请勿重复拉取`, 'error'); } }
+      : { group: '功能', icon: 'search', label: '重构搜索索引', sub: '全实例库表缓存，供搜表名', run: () => confirmRebuildIndex() },
   ];
 }
 
