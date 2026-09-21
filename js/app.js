@@ -2922,37 +2922,14 @@ function promptText(title, placeholder = '') {
 }
 
 /* 收藏：选择存本地（分组+命名）或云端（直接命名）；结果栏「存本地」保持不变 */
+/* 五角星收藏：直接打开收藏弹窗（本地保存 + 默认勾选同步云端） */
 $('#save-favorite').addEventListener('click', () => {
   const r = [...state.results].reverse().find((x) => x.kind === 'query');
   const sql = r?.sql || editor.value;
   if (!sql.trim()) return toast('还没有可收藏的 SQL', 'error');
   const target = r?.target || `${$('#instance-name').value}/${$('#db-name').value}`;
   const [instance = '', db = ''] = String(target).split('/');
-  const body = el(`<div>
-    <div class="sql-cell" style="font-family:var(--mono);font-size:12px;background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;max-height:76px;overflow:auto;margin-bottom:4px">${escapeHtml(sql.slice(0, 300))}</div>
-    <div style="display:flex;flex-direction:column;gap:10px">
-      <button class="button favpick" id="favpick-local">${icon('star')}<span><b>存到本地收藏</b><small>仅本机保存 · 可选分组 · 支持一键查询</small></span></button>
-      <button class="button favpick" id="favpick-cloud">${icon('upload')}<span><b>存到云端收藏</b><small>同步 Archery 账号 · 任何设备可见</small></span></button>
-    </div>
-  </div>`);
-  body.querySelector('#favpick-local').addEventListener('click', () => {
-    closeModal();
-    openLocalSaveModal({ sql, instance, db });
-  });
-  body.querySelector('#favpick-cloud').addEventListener('click', async () => {
-    closeModal();
-    try {
-      const res = await state.api.queryLog({ limit: 1, offset: 0 });
-      const row = res.rows?.[0];
-      if (!row) throw new Error('未找到查询日志');
-      const alias = (await promptText('收藏别名（可留空）：', row.sqllog.slice(0, 40))) ?? '';
-      await state.api.favorite(row.id, true, alias);
-      toast('已收藏，可在「收藏」页查看', 'success');
-    } catch (e) {
-      toast(`收藏失败：${e.message}`, 'error');
-    }
-  });
-  openModal('收藏这条 SQL 到哪里？', body);
+  openLocalSaveModal({ sql, instance, db });
 });
 
 /* ======================= 查询历史 / 收藏 ======================= */
@@ -3124,7 +3101,7 @@ function openLocalSaveModal({ sql, instance = '', db = '', onSaved } = {}) {
     <label class="setting-row"><span>分组</span><select id="lf-group" class="select"></select></label>
     <label class="setting-row"><span>新建分组（可选）</span><input id="lf-newgroup" type="text" placeholder="输入新分组名，留空则用上方分组" maxlength="30" /></label>
     <div class="setting-row"><span>云端</span>
-      <label class="fav-check"><input type="checkbox" id="lf-cloud" />同步到 Archery 收藏，跨设备可见（仅只读语句）</label>
+      <label class="fav-check"><input type="checkbox" id="lf-cloud" checked />同步到 Archery 收藏，跨设备可见（仅只读语句）</label>
     </div>
     <div class="setting-actions"><button class="button primary" id="lf-save">${icon('check')}<span>保存</span></button></div>
   </div>`);
