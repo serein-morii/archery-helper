@@ -226,11 +226,11 @@ async function connect() {
     buildInstanceSelectors();
     buildTree();
     restoreDraft();
-    // 连接成功后：索引为空或全量索引超过 7 天 → 后台自动重建表级索引（不阻塞使用，进度见侧边栏；手动点按钮可深度重建含字段）
+    // 连接成功后：索引为空或全量索引超过 7 天 → 后台自动重建（库+表级，不阻塞使用，进度见侧边栏）
     metaIndex.load().then(() => {
       const empty = !Object.keys(metaIndex.data.dbs).length;
       const stale = Date.now() - (metaIndex.data.updatedAt || 0) > META_INDEX_TTL;
-      if ((empty || stale) && state.instances.length) runFullIndexBuild({ deep: false });
+      if ((empty || stale) && state.instances.length) runFullIndexBuild();
     });
     // 无凭证（纯浏览器会话）时，用自己最近一条查询日志取显示名
     if (!state.cfg.username) {
@@ -545,15 +545,15 @@ function dbNode(ins, dbName) {
         action: () => exportDataDict(typeof ins === 'string' ? ins : ins.name || ins.instance_name, dbName),
       },
       {
-        label: '重建该库搜索索引（含字段）',
+        label: '重建该库搜索索引',
         icon: 'search',
         action: async () => {
           const insName = typeof ins === 'string' ? ins : ins.name || ins.instance_name;
           setIndexProgress(true, `索引：${insName}/${dbName}`);
           try {
-            await indexDb(insName, dbName, { withColumns: true });
+            await indexDb(insName, dbName);
             setIndexProgress(false);
-            toast(`已索引 ${insName}/${dbName}（顶部搜索可搜该库表和字段）`, 'success');
+            toast(`已索引 ${insName}/${dbName}（顶部搜索可搜该库表名）`, 'success');
           } catch (e) {
             setIndexProgress(false);
             toast(`索引失败：${e.message}`, 'error');
@@ -762,12 +762,12 @@ $('#refresh-tree').addEventListener('click', (e) => {
 function confirmRebuildIndex() {
   if (indexBuilding) {
     setIndexProgress(true);
-    return toast('索引正在后台重建中（进度见左侧），完成后再试', 'info');
+    return toast('索引正在重建中（进度见左侧），请等待完成', 'info');
   }
   const body = el(`<div>
     <p style="margin:0 0 12px;font-size:12.5px;line-height:1.7;color:var(--text-2)">
-      将遍历<b>全部实例</b>逐库重建搜索索引（含全字段），供顶部搜索搜表名 / 字段名。<br />
-      实例较多时<b>耗时可能达数分钟</b>；期间可正常使用其他功能，进度显示在左侧数据浏览器。
+      将遍历<b>全部实例</b>逐库拉取「库 + 表」清单建立索引（相当于把对象树全部展开的快照），供顶部搜索直接搜到<b>表名</b>。<br />
+      只拉库和表、不拉字段，开销可控；实例较多时仍需一些时间，期间可正常使用其他功能，进度显示在左侧数据浏览器。
     </p>
     <div class="setting-actions">
       <button class="button" id="idx-cancel">取消</button>
@@ -777,7 +777,7 @@ function confirmRebuildIndex() {
   body.querySelector('#idx-cancel').addEventListener('click', closeModal);
   body.querySelector('#idx-go').addEventListener('click', () => {
     closeModal();
-    runFullIndexBuild({ deep: true });
+    runFullIndexBuild();
   });
   openModal('重构搜索索引', body);
 }
@@ -830,21 +830,34 @@ async function preloadTables() {
   }
 }
 
-/* ======================= 对象搜索索引（本地缓存，供命令面板搜表/字段） =======================
- * 结构：{ version, updatedAt, dbs: { "<instance>|<db>": { instance, db, tables: { 表名: [字段...] }, updatedAt } } }
- * - 查询某库时静默增量更新（含字段，information_schema 一次拉全库）
- * - 手动全量重建：所有实例的库表清单（已有字段的库保留字段），带进度
- * - 库右键可单独重建（含字段） */
+/* ======================= 对象搜索索引（本地缓存，供顶部搜索搜表名） =======================
+ * 结构：{ version: 2, updatedAt, dbs: { "<instance>|<db>": { instance, db, tables: [表名...], updatedAt } } }
+ * 只拉「库 + 表」两级（相当于对象树全展开的快照）；字段搜索请用侧边栏「字段」模式
+ * - 查询某库时静默增量更新该库（7 天过期）
+ * - 连接后自动重建 / 手动全量重建（带进度） */
 const META_INDEX_KEY = 'meta-index';
-const META_INDEX_TTL = 7 * 24 * 3600 * 1000; // 查过的库 7 天后自动重建
+const META_INDEX_TTL = 7 * 24 * 3600 * 1000;
 const metaIndex = {
-  data: { version: 1, updatedAt: 0, dbs: {} },
+  data: { version: 2, updatedAt: 0, dbs: {} },
   loaded: false,
   async load() {
     if (this.loaded) return;
     try {
       const o = await chrome.storage.local.get({ [META_INDEX_KEY]: null });
-      if (o[META_INDEX_KEY]?.dbs) this.data = o[META_INDEX_KEY];
+      const raw = o[META_INDEX_KEY];
+      if (raw?.dbs) {
+        // 旧版（v1，tables 为对象含字段数组）迁移为纯表名数组
+        if (raw.version !== 2) {
+          for (const e of Object.values(raw.dbs)) {
+            e.tables = Array.isArray(e.tables) ? e.tables : Object.keys(e.tables || {});
+          }
+          raw.version = 2;
+          this.data = raw;
+          this.save(); // 迁移结果落盘，避免每次加载重复迁移
+        } else {
+          this.data = raw;
+        }
+      }
       this.loaded = true;
     } catch { /* 隐身等场景静默降级为内存索引 */ }
   },
@@ -857,37 +870,13 @@ const metaIndex = {
   entry(instance, db) { return this.data.dbs[this.key(instance, db)]; },
 };
 
-/** information_schema 一次拉全库字段（仅 MySQL / TiDB） */
-async function fetchDbColumns(instance, db) {
-  const ins = state.instances.find((i) => i.instance_name === instance);
-  if (!['mysql', 'tidb'].includes(ins?.db_type || 'mysql')) return {};
-  const escDb = db.replace(/'/g, "''");
-  const res = await state.api.query({
-    instanceName: instance,
-    dbName: db,
-    sqlContent: `select table_name, column_name from information_schema.columns where table_schema='${escDb}'`,
-    limitNum: 20000,
-  });
-  if (res.status !== 0) throw new Error(res.msg || '字段查询失败');
-  const map = {};
-  for (const [tb, col] of res.data?.rows || []) (map[tb] ??= []).push(col);
-  return map;
-}
-
-/** 建立单个库的索引；withColumns 时附全库字段 */
-async function indexDb(instance, db, { withColumns = false } = {}) {
+/** 建立单个库的索引（仅表清单）；persist=false 时由调用方统一落盘 */
+async function indexDb(instance, db, { persist = true } = {}) {
   const t = await state.api.tables(instance, db, '');
   if (t.status !== 0) throw new Error(t.msg || '表清单获取失败');
-  const tables = {};
-  for (const name of t.data || []) tables[name] = [];
-  if (withColumns) {
-    try {
-      const cols = await fetchDbColumns(instance, db);
-      for (const [tb, list] of Object.entries(cols)) (tables[tb] ??= []).push(...list);
-    } catch { /* 字段失败不阻塞表级索引 */ }
-  }
+  const tables = (t.data || []).map(String);
   metaIndex.data.dbs[metaIndex.key(instance, db)] = { instance, db, tables, updatedAt: Date.now() };
-  await metaIndex.save();
+  if (persist) await metaIndex.save();
 }
 
 /** 查询库时静默增量更新（无索引或已过期才拉，不影响现有流程） */
@@ -897,21 +886,20 @@ async function indexDbLazy(instance, db) {
   const e = metaIndex.entry(instance, db);
   if (e && Date.now() - e.updatedAt < META_INDEX_TTL) return;
   try {
-    await indexDb(instance, db, { withColumns: true });
+    await indexDb(instance, db);
   } catch { /* 静默：索引失败不影响查询 */ }
 }
 
-/** 全量重建：所有实例 → 所有库；deep 时逐库附全字段（慢但可搜任意字段）；进度回调 (done, total, text) */
+/** 全量重建：所有实例 → 所有库的表清单；进度回调 (done, total, text) */
 let indexBuilding = false;
-async function rebuildFullIndex(onProgress, { deep = false } = {}) {
+async function rebuildFullIndex(onProgress) {
   if (indexBuilding) throw new Error('索引正在重建中，请稍候');
   indexBuilding = true;
   try {
     await metaIndex.load();
-    const instances = state.instances.filter((i) => ['mysql', 'tidb'].includes(i.db_type));
     let total = 0, done = 0;
     const allPairs = [];
-    for (const ins of instances) {
+    for (const ins of state.instances) {
       try {
         const res = await state.api.databases(ins.instance_name);
         if (res.status !== 0) continue;
@@ -919,14 +907,14 @@ async function rebuildFullIndex(onProgress, { deep = false } = {}) {
       } catch { /* 单实例失败跳过 */ }
     }
     total = allPairs.length;
-    if (!total) throw new Error('没有可索引的库（需要 MySQL / TiDB 实例）');
+    if (!total) throw new Error('没有可索引的库（实例列表为空或库清单拉取失败）');
     for (const [instance, db] of allPairs) {
       done += 1;
       onProgress?.(done, total, `${instance}/${db}`);
       try {
-        await indexDb(instance, db, { withColumns: deep });
+        await indexDb(instance, db, { persist: false }); // 全部完成统一落盘，避免几百次 storage 写
       } catch { /* 单库失败继续 */ }
-      await new Promise((r) => setTimeout(r, 30)); // 轻微限速，避免打挂服务端
+      await new Promise((r) => setTimeout(r, 20)); // 轻微限速，避免打挂服务端
     }
     metaIndex.data.updatedAt = Date.now();
     await metaIndex.save();
@@ -946,21 +934,20 @@ function setIndexProgress(visible, text, pct) {
   if (fill) fill.style.width = pct != null ? `${Math.max(0, Math.min(100, Math.round(pct)))}%` : '0%';
 }
 
-/** 手动重建（含全字段，慢但可搜任意字段），带进度 */
-async function runFullIndexBuild({ deep = true } = {}) {
+/** 全量重建（库+表级），带进度 */
+async function runFullIndexBuild() {
   if (!state.instances.length) return toast('请先连接 Archery（等待实例列表加载）', 'error');
-  // 后台自动索引进行中：不报错、不隐藏其进度，提示等它完成
   if (indexBuilding) {
     setIndexProgress(true);
-    return toast(deep ? '索引正在后台重建中（进度见左侧），完成后再点可深度重建（含字段）' : '索引正在重建中，进度见左侧数据浏览器', 'info');
+    return toast('索引正在重建中（进度见左侧），请等待完成', 'info');
   }
   setIndexProgress(true, '正在拉取库清单…');
   try {
     const { total } = await rebuildFullIndex((done, t, name) => {
       setIndexProgress(true, `索引 ${done}/${t}（${Math.round((done / t) * 100)}%）：${name}`, (done / t) * 100);
-    }, { deep });
+    });
     setIndexProgress(false);
-    toast(`搜索索引已重建：${total} 个库${deep ? '（含字段）' : '（表级）'}`, 'success');
+    toast(`搜索索引已重建：${total} 个库，现在可搜索全部表名`, 'success');
   } catch (e) {
     setIndexProgress(false);
     toast(`索引重建失败：${e.message}`, 'error');
@@ -4434,7 +4421,7 @@ function paletteActions() {
     { group: '功能', icon: 'sun', label: '切换深浅主题', run: () => $('#theme-toggle').click() },
     { group: '功能', icon: 'settings', label: '设置', run: () => $('#settings-open').click() },
     { group: '功能', icon: 'refresh', label: '重新连接', run: () => connect() },
-    { group: '功能', icon: 'search', label: '重构搜索索引', sub: '全实例库表缓存，供搜表/搜字段', run: () => confirmRebuildIndex() },
+    { group: '功能', icon: 'search', label: '重构搜索索引', sub: '全实例库表缓存，供搜表名', run: () => confirmRebuildIndex() },
   ];
 }
 
@@ -4493,43 +4480,28 @@ function paletteCandidates(kw) {
       });
     }
   }
-  // 索引搜索：全库的表与字段（关键字 ≥2 字才遍历索引，限量输出）
+  // 索引搜索：全库的表名（关键字 ≥2 字才遍历索引，限量输出；字段搜索走侧边栏「字段」模式）
   if (kw.length >= 2) {
-    const tables = [];
-    const columns = [];
-    const seenTable = new Set();
+    const hits = [];
+    const seen = new Set();
     for (const entry of Object.values(metaIndex.data.dbs)) {
-      if (tables.length >= 12 && columns.length >= 12) break;
+      if (hits.length >= 15) break;
       const env = `${entry.instance}/${entry.db}`;
-      for (const [tb, cols] of Object.entries(entry.tables)) {
-        if (match(tb)) {
-          if (!seenTable.has(env + tb) && tables.length < 12) {
-            seenTable.add(env + tb);
-            tables.push({
-              group: '表（索引）',
-              icon: 'table',
-              label: tb,
-              mono: true,
-              sub: env,
-              run: () => jumpToTable(entry.instance, entry.db, tb),
-            });
-          }
-        } else if (columns.length < 12) {
-          const hit = cols.find((c) => c && c.toLowerCase().includes(lower));
-          if (hit) {
-            columns.push({
-              group: '字段（索引）',
-              icon: 'key',
-              label: hit,
-              mono: true,
-              sub: `${entry.db}.${tb}`,
-              run: () => jumpToTable(entry.instance, entry.db, tb),
-            });
-          }
+      for (const tb of entry.tables || []) {
+        if (match(tb) && !seen.has(env + tb) && hits.length < 15) {
+          seen.add(env + tb);
+          hits.push({
+            group: '表（索引）',
+            icon: 'table',
+            label: tb,
+            mono: true,
+            sub: env,
+            run: () => jumpToTable(entry.instance, entry.db, tb),
+          });
         }
       }
     }
-    out.push(...tables, ...columns);
+    out.push(...hits);
   }
   // 本地最近执行（草稿 tab + 最近结果 SQL）
   const recent = [
