@@ -1383,6 +1383,7 @@ body.results-expanded .editor-toolbar { display: none; }
 .idxp-group.open > .idxp-children,
 .idxp-node.open > .idxp-children { display: block; }
 .idxp-row.expanded .caret { transform: rotate(90deg); }
+.idxp-row.filtered-hide, .idxp-group.filtered-hide { display: none !important; }
 
 /* ---------- 搜索索引进度（侧边栏） ---------- */
 .index-progress {

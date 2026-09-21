@@ -850,8 +850,14 @@ function confirmRebuildIndex({ firstRun = false } = {}) {
         点「全选」= <b>完全重建</b>（清空后拉取全部实例，耗时较长）。`}
       </p>
       <div class="idx-picker-bar">
+        <div class="search-field" style="flex:1;min-width:160px;height:30px">
+          <span data-icon="search"></span>
+          <input id="idxp-search" placeholder="搜索类型 / 实例 / 库…" autocomplete="off" />
+        </div>
         <button class="button small" id="idxp-all">${icon('check')}<span>全选（完全重建）</span></button>
         <button class="button small" id="idxp-none">清空选择</button>
+      </div>
+      <div class="idx-picker-bar" style="margin-top:-2px">
         <span class="idxp-summary" id="idxp-summary">未选择</span>
       </div>
       <div class="idx-picker-tree" id="idxp-tree"></div>
@@ -985,6 +991,56 @@ function confirmRebuildIndex({ firstRun = false } = {}) {
 
     renderPickerTree();
     sync();
+    // 树搜索：过滤 类型/实例/库，命中自动展开父链；清空关键字恢复默认收起
+    body.querySelector('#idxp-search').addEventListener('input', (e) => {
+      const kw = e.target.value.trim().toLowerCase();
+      const groups = [...tree.querySelectorAll(':scope > .idxp-group')];
+      const reset = (node) => {
+        node.querySelectorAll('.idxp-row').forEach((r) => r.classList.remove('filtered-hide'));
+        node.classList.remove('open');
+        node.querySelector(':scope > .idxp-row')?.classList.remove('expanded');
+      };
+      if (!kw) {
+        groups.forEach(reset);
+        return;
+      }
+      for (const g of groups) {
+        const gLabel = g.querySelector(':scope > .idxp-row .label')?.textContent.toLowerCase() || '';
+        const gMatch = gLabel.includes(kw);
+        let any = false;
+        if (gMatch) {
+          // 类型名命中：整组显示并展开
+          g.querySelectorAll('.idxp-row').forEach((r) => r.classList.remove('filtered-hide'));
+          any = true;
+        } else {
+          for (const node of g.querySelectorAll(':scope > .idxp-children > .idxp-node')) {
+            const iLabel = node.querySelector(':scope > .idxp-row .label')?.textContent.toLowerCase() || '';
+            const iMatch = iLabel.includes(kw);
+            let dbAny = false;
+            const dbRows = [...node.querySelectorAll(':scope > .idxp-children .idxp-row')];
+            for (const r of dbRows) {
+              const hit = r.classList.contains('idxp-db-row') && r.querySelector('.label')?.textContent.toLowerCase().includes(kw);
+              r.classList.toggle('filtered-hide', !iMatch && !hit);
+              if (hit) dbAny = true;
+            }
+            node.querySelector(':scope > .idxp-row').classList.toggle('filtered-hide', !iMatch && !dbAny);
+            if (iMatch || dbAny) {
+              node.classList.add('open');
+              node.querySelector(':scope > .idxp-row').classList.add('expanded');
+              any = true;
+            } else {
+              node.classList.remove('open');
+              node.querySelector(':scope > .idxp-row').classList.remove('expanded');
+            }
+          }
+        }
+        g.classList.toggle('filtered-hide', !any);
+        if (any) {
+          g.classList.add('open');
+          g.querySelector(':scope > .idxp-row').classList.add('expanded');
+        }
+      }
+    });
     body.querySelector('#idxp-all').addEventListener('click', () => {
       [...insBoxes, ...dbBoxes].forEach((x) => (x.box.checked = true));
       sync();

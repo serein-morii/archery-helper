@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Archery 助手",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "minimum_chrome_version": "120",
   "description": "Archery SQL 工作台：数据库对象浏览、多次查询结果保留、SQL 审核检测、工单查询与数据导出。",
   "permissions": [
