@@ -226,6 +226,12 @@ async function connect() {
     buildInstanceSelectors();
     buildTree();
     restoreDraft();
+    // 连接成功后：索引为空或全量索引超过 7 天 → 后台自动重建表级索引（不阻塞使用，进度见侧边栏；手动点按钮可深度重建含字段）
+    metaIndex.load().then(() => {
+      const empty = !Object.keys(metaIndex.data.dbs).length;
+      const stale = Date.now() - (metaIndex.data.updatedAt || 0) > META_INDEX_TTL;
+      if ((empty || stale) && state.instances.length) runFullIndexBuild({ deep: false });
+    });
     // 无凭证（纯浏览器会话）时，用自己最近一条查询日志取显示名
     if (!state.cfg.username) {
       state.api
@@ -855,9 +861,9 @@ async function indexDbLazy(instance, db) {
   } catch { /* 静默：索引失败不影响查询 */ }
 }
 
-/** 全量重建：所有实例 → 所有库的表清单；进度回调 (done, total, text) */
+/** 全量重建：所有实例 → 所有库；deep 时逐库附全字段（慢但可搜任意字段）；进度回调 (done, total, text) */
 let indexBuilding = false;
-async function rebuildFullIndex(onProgress) {
+async function rebuildFullIndex(onProgress, { deep = false } = {}) {
   if (indexBuilding) throw new Error('索引正在重建中，请稍候');
   indexBuilding = true;
   try {
@@ -878,7 +884,7 @@ async function rebuildFullIndex(onProgress) {
       done += 1;
       onProgress?.(done, total, `${instance}/${db}`);
       try {
-        await indexDb(instance, db, { withColumns: false });
+        await indexDb(instance, db, { withColumns: deep });
       } catch { /* 单库失败继续 */ }
       await new Promise((r) => setTimeout(r, 30)); // 轻微限速，避免打挂服务端
     }
@@ -898,15 +904,16 @@ function setIndexProgress(visible, text) {
   if (text) $('#index-progress-text').textContent = text;
 }
 
-async function runFullIndexBuild() {
+/** 手动重建（含全字段，慢但可搜任意字段），带进度 */
+async function runFullIndexBuild({ deep = true } = {}) {
   if (!state.instances.length) return toast('请先连接 Archery（等待实例列表加载）', 'error');
   setIndexProgress(true, '正在拉取库清单…');
   try {
     const { total } = await rebuildFullIndex((done, t, name) => {
       setIndexProgress(true, `索引 ${done}/${t}：${name}`);
-    });
+    }, { deep });
     setIndexProgress(false);
-    toast(`搜索索引已重建：${total} 个库（查询过的库自动补充字段）`, 'success');
+    toast(`搜索索引已重建：${total} 个库${deep ? '（含字段）' : '（表级）'}`, 'success');
   } catch (e) {
     setIndexProgress(false);
     toast(`索引重建失败：${e.message}`, 'error');
@@ -3477,6 +3484,103 @@ $('#diff-table-a').addEventListener('change', () => {
   setSelectValue('#diff-table-b', ta);
 });
 
+/* ======================= 本地对比历史（可点击重新对比） ======================= */
+const diffHistory = {
+  items: [],
+  async load() {
+    try {
+      const o = await chrome.storage.local.get({ 'diff-history': [] });
+      this.items = o['diff-history'] || [];
+    } catch { /* 内存态兜底 */ }
+  },
+  async save() {
+    try {
+      await chrome.storage.local.set({ 'diff-history': this.items });
+    } catch { /* 静默 */ }
+  },
+  async record(entry) {
+    const key = (e) => `${e.ia}|${e.da}|${e.ta}|${e.ib}|${e.db}|${e.tb}`;
+    this.items = this.items.filter((e) => key(e) !== key(entry));
+    this.items.unshift({ ...entry, at: Date.now() });
+    if (this.items.length > 50) this.items.length = 50;
+    await this.save();
+  },
+};
+
+function renderDiffHistory() {
+  const box = $('#diff-history');
+  const list = $('#diff-history-list');
+  if (!box || !diffHistory.items.length) {
+    if (box) box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  list.replaceChildren();
+  for (const e of diffHistory.items) {
+    const chip = el(`<button class="diff-chip" title="${escapeHtml(`${e.ia}/${e.da}.${e.ta} ↔ ${e.ib}/${e.db}.${e.tb}`)}">
+      <b>${escapeHtml(e.ta)}</b>
+      <span class="dh-env">${escapeHtml(e.ia)}/${escapeHtml(e.da)} ↔ ${escapeHtml(e.ib)}/${escapeHtml(e.db)}</span>
+      <span class="tag ${e.diffCount ? 'red' : 'green'}">${e.diffCount ? `差 ${e.diffCount}` : '一致'}</span>
+      <span class="dh-time">${new Date(e.at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
+      <span class="dh-del" title="删除该条历史">${icon('close')}</span>
+    </button>`);
+    chip.addEventListener('click', (ev) => {
+      if (ev.target.closest('.dh-del')) {
+        diffHistory.items = diffHistory.items.filter((x) => x !== e);
+        diffHistory.save();
+        renderDiffHistory();
+        return;
+      }
+      replayDiff(e);
+    });
+    list.appendChild(chip);
+  }
+}
+
+/** 等待下拉出现指定 option（联动异步加载） */
+function waitForOption(sel, value, timeout = 8000) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const tick = () => {
+      const s = $(sel);
+      if (s?.querySelector(`option[value="${CSS.escape(String(value))}"]`)) return resolve(true);
+      if (Date.now() - t0 > timeout) return resolve(false);
+      setTimeout(tick, 120);
+    };
+    tick();
+  });
+}
+
+/** 点击历史重放：回填两侧实例/库/表后自动对比 */
+async function replayDiff(e) {
+  switchView('diff');
+  // A 侧
+  if ($('#diff-instance-a').value !== e.ia) {
+    setSelectValue('#diff-instance-a', e.ia); // change → bindDiffInstance 异步加载库
+  }
+  if (!(await waitForOption('#diff-db-a', e.da))) return toast(`A 侧库 ${e.da} 已不可见`, 'error');
+  if ($('#diff-db-a').value !== e.da) setSelectValue('#diff-db-a', e.da); // change → 加载表
+  if (!(await waitForOption('#diff-table-a', e.ta))) return toast(`A 侧表 ${e.ta} 已不可见`, 'error');
+  setSelectValue('#diff-table-a', e.ta);
+  // B 侧
+  if ($('#diff-instance-b').value !== e.ib) {
+    setSelectValue('#diff-instance-b', e.ib);
+  }
+  if (!(await waitForOption('#diff-db-b', e.db))) return toast(`B 侧库 ${e.db} 已不可见`, 'error');
+  if ($('#diff-db-b').value !== e.db) setSelectValue('#diff-db-b', e.db);
+  if (!(await waitForOption('#diff-table-b', e.tb))) return toast(`B 侧表 ${e.tb} 已不可见`, 'error');
+  setSelectValue('#diff-table-b', e.tb);
+  runTableDiff();
+}
+
+$('#diff-history-clear').addEventListener('click', async () => {
+  diffHistory.items = [];
+  await diffHistory.save();
+  renderDiffHistory();
+  toast('对比历史已清空', 'info');
+});
+diffHistory.load().then(renderDiffHistory);
+
 /** 建表语句归一化：去除 AUTO_INCREMENT=N、多余空白，便于比对 */
 function normalizeCreate(sql) {
   return String(sql || '')
@@ -3815,6 +3919,9 @@ async function runTableDiff() {
     tbody.appendChild(foot);
     tbody.querySelector('#diff-open-side').addEventListener('click', () => showSideBySide(ta, tb, ca.raw, cb.raw, `${ia}/${da}`, `${ib}/${dbb}`));
     toast(diffCount ? `字段级差异 ${diffCount} 项（共 ${rows.length} 字段）` : '两张表字段完全一致', diffCount ? 'info' : 'success');
+    // 记入本地对比历史（相同参数覆盖置顶）
+    diffHistory.record({ ia, da, ta, ib, db: dbb, tb, diffCount, total: rows.length });
+    renderDiffHistory();
   } catch (e) {
     toast(`单表对比失败：${e.message}`, 'error');
   } finally {

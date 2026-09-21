@@ -1336,6 +1336,57 @@ body.results-expanded .editor-toolbar { display: none; }
   white-space: nowrap;
 }
 
+/* ---------- 对比历史（本地，点击重放） ---------- */
+.diff-history {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  padding: 10px 12px;
+}
+.diff-history-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.dh-title { font-size: 12.5px; font-weight: 700; }
+.dh-hint { font-size: 11px; color: var(--text-3); }
+.diff-history-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 108px;
+  overflow: auto;
+}
+.diff-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel-2);
+  color: var(--text-2);
+  font-size: 12px;
+  padding: 5px 9px;
+  cursor: pointer;
+  transition: all 0.13s ease;
+}
+.diff-chip:hover { border-color: var(--brand); background: var(--brand-softer); color: var(--text-1); }
+.diff-chip b { font-weight: 700; }
+.dh-env { color: var(--text-3); font-size: 11px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dh-time { color: var(--text-3); font-size: 10.5px; }
+.dh-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  color: var(--text-3);
+}
+.dh-del .icon { width: 11px; height: 11px; }
+.dh-del:hover { background: var(--danger-soft); color: var(--danger); }
+
 /* ---------- 侧边栏模式切换（对象/字段） ---------- */
 .sidebar-modes {
   display: flex;

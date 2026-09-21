@@ -374,6 +374,14 @@
             <button class="button" id="diff-deep"><span data-icon="shield"></span>深度对比同名表</button>
             <span class="editor-hint">清单只扫表名；结构差异优先用单表对比</span>
           </div>
+          <div id="diff-history" class="diff-history" hidden>
+            <div class="diff-history-head">
+              <span class="dh-title">对比历史</span>
+              <span class="dh-hint">点击即可重新发起对比</span>
+              <button class="button small" id="diff-history-clear" style="margin-left:auto"><span data-icon="trash"></span>清空</button>
+            </div>
+            <div id="diff-history-list" class="diff-history-list"></div>
+          </div>
           <div id="diff-progress" class="diff-progress" hidden>
             <span class="spinner"></span><span id="diff-progress-text">对比中…</span>
           </div>
