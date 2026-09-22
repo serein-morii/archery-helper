@@ -1,0 +1,16 @@
+CHANGELOG.md
+  h_d554d32aa9d663 9
+js/detector.js
+  h_d554d32aa9d663 9-10,14-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "2aa278a5bdc04cc873707a43a8afa3b65195b56a",
+  "prompts": {},
+  "humans": {
+    "h_d554d32aa9d663": {
+      "author": "pengchenghui <pengchenghui@jtexpress.com>"
+    }
+  }
+}
