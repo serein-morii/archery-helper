@@ -1,0 +1,18 @@
+CHANGELOG.md
+  h_d554d32aa9d663 3,5-6,10-15
+README.md
+  h_d554d32aa9d663 3
+manifest.json
+  h_d554d32aa9d663 4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b644cd42ce7002b4eafe9ee672eb0b75150b6a03",
+  "prompts": {},
+  "humans": {
+    "h_d554d32aa9d663": {
+      "author": "pengchenghui <pengchenghui@jtexpress.com>"
+    }
+  }
+}
