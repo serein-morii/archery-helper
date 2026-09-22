@@ -100,17 +100,25 @@ function makeSearchable(select) {
     }
   };
 
+  const onScroll = () => close();
   const open = () => {
     panel.hidden = false;
+    // fixed 定位按按钮实时位置计算：避免父容器 overflow:hidden 裁剪下拉面板（如提单面板在卡片内）
+    const r = box.getBoundingClientRect();
+    panel.style.left = `${r.left}px`;
+    panel.style.top = `${Math.min(r.bottom + 4, innerHeight - 260)}px`;
+    panel.style.width = `${Math.max(r.width, 200)}px`;
     search.value = '';
     renderList('');
     search.focus();
     document.addEventListener('mousedown', onDocDown, true);
+    window.addEventListener('scroll', onScroll, true); // 页面滚动时收起，避免面板与按钮错位
   };
   const close = () => {
     panel.hidden = true;
     renderLabel();
     document.removeEventListener('mousedown', onDocDown, true);
+    window.removeEventListener('scroll', onScroll, true);
   };
   const onDocDown = (e) => {
     if (!wrap.contains(e.target)) close();

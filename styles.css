@@ -1971,11 +1971,8 @@ input[type='checkbox'] { accent-color: var(--brand); width: 15px; height: 15px; 
 .combo-arrow { flex: none; color: var(--text-3); display: inline-flex; }
 .combo-arrow svg { width: 14px; height: 14px; }
 .combo-panel {
-  position: absolute;
+  position: fixed; /* 打开时由 JS 按按钮位置定位：摆脱父容器 overflow:hidden 裁剪（如提单面板） */
   z-index: 400;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
   min-width: 200px;
   background: var(--panel);
   border: 1px solid var(--border);
