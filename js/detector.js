@@ -6,14 +6,14 @@
  */
 (function () {
   try {
-    if (window.top === window && !/\/login\/?$/i.test(location.pathname)) {
-      // 顶层页面仅关注 /login 类地址；iframe（门户嵌入）不限路径
-      if (!/archery/i.test(location.hostname)) return;
-    }
+    // 任意页面（含根路径主页、IP 部署、iframe 嵌入）都用页面特征判断；
+    // 误报由后台 GET /login/ 验证兜底过滤，这里宽松无妨
     const isArchery =
       /archery/i.test(document.title || '') ||
       /archery/i.test(location.hostname) ||
-      !!document.querySelector('script[src*="archery"], link[href*="archery"], img[src*="archery"]') ||
+      !!document.querySelector(
+        'script[src*="archery"], link[href*="archery"], img[src*="archery"], a[href*="/sqlquery"], a[href*="/sqlworkflow"]'
+      ) ||
       (location.pathname.startsWith('/login') && !!document.querySelector('form input[name="csrfmiddlewaretoken"]'));
     if (isArchery) {
       chrome.runtime.sendMessage({ type: 'archery-detected', origin: location.origin }).catch(() => {});

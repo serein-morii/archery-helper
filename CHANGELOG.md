@@ -6,7 +6,7 @@
 - 收藏卡片新增「查看」按钮：大弹窗只读展示完整 SQL（含分组 / 实例库 / 时间 / 云端状态与一键复制）；编辑收藏弹窗加大（最大 96vw），SQL 编辑区撑满近半屏
 - 收藏卡片与查询历史列表的 SQL 均新增小复制按钮（一键复制完整 SQL）
 - 修复提交工单「资源组」下拉无法选择（两层原因）：① 会话过期时 /submitsql/ 返回登录页被静默解析为空列表——现在明确报错；② 可搜索下拉面板为绝对定位，被提单面板所在卡片的 overflow:hidden 裁剪导致点开看不见——全部下拉面板改为打开时按按钮位置 fixed 定位（页面滚动自动收起），彻底摆脱容器裁剪
-- Archery 地址自动发现（双通道，不写死任何域名）：① 页面特征——content script 在所有页面与 iframe 中识别 Archery 登录页特征并上报 origin；② 接口推测——webRequest 观察浏览器请求，命中 Archery 独有接口路径（/authenticate/、/instance_resource/、/user_all_instances/ 等）即提取 origin，覆盖「其他网页 iframe 嵌入 Archery」场景
+- Archery 地址自动发现（双通道，不写死任何域名）：① 页面特征——content script 在所有页面与 iframe 中识别 Archery 页面特征（标题 / 静态资源 / sqlquery、sqlworkflow 导航链接，兼容 IP 部署与根路径主页）并上报 origin；② 接口推测——webRequest 观察浏览器请求，命中 Archery 独有接口路径（/authenticate/、/instance_resource/、/user_all_instances/ 等）即提取 origin，覆盖「其他网页 iframe 嵌入 Archery」场景
 - 候选 origin 由后台 GET /login/ 验证 Archery 页面特征后保存（最多 5 个，只存 origin 不收集页面内容）；扩展未配置地址时，弹窗与工作台自动采用候选——在该 Archery 登录后 cookie 落地即可直接使用
 
 ## 1.2.2（2026-09-21）
