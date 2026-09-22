@@ -249,7 +249,9 @@
   transition: all 0.13s ease;
   font-family: var(--mono);
 }
-.cand-btn:hover { border-color: var(--brand); background: var(--brand-softer); color: var(--brand); }
+.cand-btn:hover:not(:disabled) { border-color: var(--brand); background: var(--brand-softer); color: var(--brand); }
+.cand-btn.active { border-color: var(--brand); color: var(--brand); background: var(--brand-softer); }
+.cand-btn:disabled { cursor: default; opacity: 0.85; }
 .cand-btn .cand-tag {
   margin-left: auto;
   font-size: 10px;

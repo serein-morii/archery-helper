@@ -86,6 +86,42 @@ async function renderCandidates() {
 }
 
 /**
+ * 已配置地址时的切换列表：所有已知地址（自动发现 + 手动保存），当前项打勾，
+ * 点击其他地址即切换（保留凭证）并重新检测连接。
+ */
+async function renderAddressSwitcher(current) {
+  const box = $('#popup-candidates');
+  const { archeryCandidates } = await chrome.storage.local.get({ archeryCandidates: [] });
+  if (!archeryCandidates.length) {
+    box.hidden = true;
+    box.replaceChildren();
+    return;
+  }
+  box.hidden = false;
+  box.replaceChildren();
+  const title = document.createElement('div');
+  title.className = 'cand-title';
+  title.textContent = '地址（点击切换）：';
+  box.appendChild(title);
+  for (const c of archeryCandidates) {
+    const btn = document.createElement('button');
+    const isCur = c.origin === current;
+    btn.className = 'cand-btn' + (isCur ? ' active' : '');
+    btn.innerHTML = `<span>${isCur ? '✓ ' : ''}${c.origin.replace(/^https?:\/\//, '')}</span><span class="cand-tag">${c.source === 'manual' ? '手动添加' : '自动发现'}</span>`;
+    if (!isCur) {
+      btn.addEventListener('click', async () => {
+        await saveConfig({ baseUrl: c.origin });
+        message(`已切换到 ${c.origin}，正在检测连接…`);
+        detect();
+      });
+    } else {
+      btn.disabled = true;
+    }
+    box.appendChild(btn);
+  }
+}
+
+/**
  * 打开弹窗即自动检测：
  * 1. 未配置地址 → 探测当前标签页是否为 Archery，是则自动采用该地址；
  * 2. 读浏览器 cookie jar 里的 sessionid（用户在浏览器登录过 Archery 即存在）；
@@ -127,6 +163,7 @@ async function detect() {
   $('#popup-code').textContent = '正在获取登录状态';
   setStatus(false, '检测中');
   $('#open-assistant').disabled = true;
+  renderAddressSwitcher(cfg.baseUrl); // 已配置：显示已知地址列表，点击切换
 
   // 未授权该地址时提示（查询不带端口的 host 模式，与 manifest 声明一致）
   const u = new URL(cfg.baseUrl);
