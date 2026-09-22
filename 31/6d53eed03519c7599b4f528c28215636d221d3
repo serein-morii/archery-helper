@@ -1,0 +1,16 @@
+js/popup.js
+  h_d554d32aa9d663 88-123,166
+popup.css
+  h_d554d32aa9d663 252-254
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "316d53eed03519c7599b4f528c28215636d221d3",
+  "prompts": {},
+  "humans": {
+    "h_d554d32aa9d663": {
+      "author": "pengchenghui <pengchenghui@jtexpress.com>"
+    }
+  }
+}
