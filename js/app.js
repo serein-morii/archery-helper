@@ -2880,10 +2880,41 @@ function exportInserts(r) {
   });
 }
 
+const describePending = new Set(); // `${ins}|${db}|${table}` 加载中去重
+
+function describeKey(insName, dbName, tableName) {
+  return `${insName}|${dbName}|${tableName}`;
+}
+
+function findDescribeResult(insName, dbName, tableName) {
+  const target = `${insName}/${dbName}`;
+  return state.results.find(
+    (r) =>
+      r.kind === 'describe' &&
+      r.target === target &&
+      (r.tableName === tableName || r.title === tableName || String(r.title || '').startsWith(`${tableName} · `))
+  );
+}
+
+function focusResult(r) {
+  if (!r) return;
+  state.activeResult = r.id;
+  renderResultTabs();
+  renderActiveResult();
+}
+
 async function describeTable(ins, dbName, tableName) {
   const insName = typeof ins === 'string' ? ins : ins.name || ins.instance_name;
   const insObj = state.instances.find((i) => i.instance_name === insName);
   const dbType = insObj?.db_type || 'mysql';
+  const key = describeKey(insName, dbName, tableName);
+  const existing = findDescribeResult(insName, dbName, tableName);
+  if (existing) {
+    focusResult(existing);
+    return;
+  }
+  if (describePending.has(key)) return; // 加载中重复点击忽略
+  describePending.add(key);
   try {
     // 优先走数据字典接口：一次拿全 字段/索引/建表语句
     let dict = null;
@@ -2896,7 +2927,8 @@ async function describeTable(ins, dbName, tableName) {
     if (dict) {
       pushResult({
         kind: 'describe',
-        title: tableName,
+        title: `${tableName} · ${insName}/${dbName}`,
+        tableName,
         target: `${insName}/${dbName}`,
         createSql: (dict.create_sql?.[0]?.[1] || '') + ';',
         dictDesc: dict.desc || null,   // {column_list, rows}
@@ -2914,7 +2946,8 @@ async function describeTable(ins, dbName, tableName) {
     }
     pushResult({
       kind: 'describe',
-      title: tableName,
+      title: `${tableName} · ${insName}/${dbName}`,
+      tableName,
       target: `${insName}/${dbName}`,
       columns: d.column_list || [],
       rows: d.rows || [],
@@ -2923,6 +2956,8 @@ async function describeTable(ins, dbName, tableName) {
     });
   } catch (e) {
     pushResult({ kind: 'error', title: '错误', target: `${insName}/${dbName}`, error: `查看 ${tableName} 结构失败：${e.message}` });
+  } finally {
+    describePending.delete(key);
   }
 }
 

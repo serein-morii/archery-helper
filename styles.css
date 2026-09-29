@@ -893,7 +893,12 @@ html[data-theme="light"] .tok-op { color: #0f7173; }
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
+  max-width: 380px;
   transition: all 0.12s ease;
+}
+.result-tab > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .result-tab:hover { background: var(--panel-3); color: var(--text-1); }
 .result-tab.active {
