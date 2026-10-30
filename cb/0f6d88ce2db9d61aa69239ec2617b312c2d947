@@ -1,0 +1,19 @@
+main.html
+  s_0055b9a5fcabc0::t_31c28869c09342 210
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cb0f6d88ce2db9d61aa69239ec2617b312c2d947",
+  "prompts": {},
+  "sessions": {
+    "s_0055b9a5fcabc0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0801a-9867-7980-beb3-9e83c68d1ae7",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "pengchenghui <pengchenghui@jtexpress.com>"
+    }
+  }
+}
