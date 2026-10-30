@@ -2183,7 +2183,7 @@ $('#avatar').addEventListener('click', () => {
 function updateExportButtons() {
   const r = activeResultData();
   const show = exportUnlocked && r?.kind === 'query' && !!r.rows?.length;
-  for (const id of ['export-csv', 'export-excel', 'export-json']) {
+  for (const id of ['export-csv', 'export-excel', 'export-json', 'copy-json']) {
     $('#' + id).hidden = !show;
   }
 }
@@ -2221,11 +2221,8 @@ function buildXlsXml(columns, rows, meta) {
   );
 }
 
-function exportActive(type) {
-  const r = activeResultData();
-  if (!r || r.kind !== 'query' || !r.rows?.length) return toast('当前没有可导出的查询结果', 'error');
-  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-  const name = `archery-${r.target.replace(/[\\/:*?"<>|]/g, '_')}-${stamp}`;
+/** 导出/复制共用的数据准备：套用当前筛选与列排序 */
+function prepareExportData(r) {
   let data = r.rows;
   if (r.filter) {
     const f = r.filter.toLowerCase();
@@ -2240,6 +2237,15 @@ function exportActive(type) {
       return String(x).localeCompare(String(y), 'zh-CN') * r.sortDir;
     });
   }
+  return data;
+}
+
+function exportActive(type) {
+  const r = activeResultData();
+  if (!r || r.kind !== 'query' || !r.rows?.length) return toast('当前没有可导出的查询结果', 'error');
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  const name = `archery-${r.target.replace(/[\\/:*?"<>|]/g, '_')}-${stamp}`;
+  const data = prepareExportData(r);
   if (type === 'csv') {
     const esc = (v) => (v === null || v === undefined ? '' : /[",\n\r]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
     const csv = [r.columns.map(esc).join(','), ...data.map((row) => row.map(esc).join(','))].join('\r\n');
@@ -2267,6 +2273,20 @@ function exportActive(type) {
 $('#export-csv').addEventListener('click', () => exportActive('csv'));
 $('#export-excel').addEventListener('click', () => exportActive('excel'));
 $('#export-json').addEventListener('click', () => exportActive('json'));
+
+/* 复制 JSON：与导出 JSON 同构（列名为键、套用当前筛选/排序），不触发导出后锁定 */
+$('#copy-json').addEventListener('click', async () => {
+  const r = activeResultData();
+  if (!r || r.kind !== 'query' || !r.rows?.length) return toast('当前没有可复制的结果', 'error');
+  const data = prepareExportData(r);
+  const objs = data.map((row) => Object.fromEntries(r.columns.map((c, i) => [c, row[i]])));
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(objs, null, 2));
+    toast(`已复制 ${data.length} 行 JSON`, 'success');
+  } catch (e) {
+    toast(`复制失败：${e.message}`, 'error');
+  }
+});
 
 /* ======================= 结果表格右键菜单 ======================= */
 function sqlValue(v) {
