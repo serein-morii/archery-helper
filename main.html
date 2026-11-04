@@ -105,6 +105,11 @@
       <main class="workspace">
         <!-- ============ 查询工作台 ============ -->
         <section class="view active" id="view-query">
+          <div class="query-tabbar-top">
+            <div id="query-tabs" class="result-tabs" role="tablist" aria-label="SQL 查询标签"></div>
+            <span class="autosave" id="autosave"><i></i>草稿自动保存</span>
+          </div>
+
           <div class="query-bar">
             <label class="bar-field grow">
               <span>实例</span>
@@ -140,10 +145,6 @@
           </div>
 
           <section class="console-card">
-            <div class="query-tabbar-top">
-              <div id="query-tabs" class="result-tabs" role="tablist" aria-label="SQL 查询标签"></div>
-              <span class="autosave" id="autosave"><i></i>草稿自动保存</span>
-            </div>
             <div class="editor-toolbar">
               <div class="toolbar-left">
                 <button class="icon-button" id="format" title="格式化 SQL" aria-label="格式化 SQL">

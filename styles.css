@@ -1328,9 +1328,8 @@ body.results-expanded .editor-toolbar { display: none; }
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px 0;
+  padding: 0 2px 6px; /* 置于卡片外、查询栏之上：与查询栏左对齐并留出呼吸间距 */
   flex: none;
-  min-height: 40px;
 }
 .query-tabbar-top .result-tabs { flex: 1; }
 .autosave {
