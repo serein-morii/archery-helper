@@ -1390,6 +1390,17 @@ function syncActiveTabSelectors() {
   renderQueryTabs();
 }
 
+/** 从 SQL 第一行 `-- 标题` 派生标签标题；变化时刷新标签栏。返回是否变化 */
+function deriveTabTitle(tab) {
+  if (!tab) return false;
+  const firstLine = String(tab.sql || '').split('\n')[0].trim();
+  const m = firstLine.match(/^--\s*(.*)$/);
+  const title = m ? m[1].trim().slice(0, 40) : '';
+  if (title === (tab.title || '')) return false;
+  tab.title = title;
+  return true;
+}
+
 /** 恢复标签自带的选择器（实例→库→schema 逐级等待就绪） */
 async function applyTabSelectors(tab) {
   const seq = ++tabApplySeq;
@@ -1454,6 +1465,7 @@ function newQueryTab(sql = '') {
     const cur = queryTabs.list.find((t) => t.id === queryTabs.activeId);
     if (cur) {
       cur.sql = editor.value;
+      deriveTabTitle(cur);
       snapshotSelectors(cur);
     }
   }
@@ -1474,6 +1486,7 @@ function switchQueryTab(id) {
   const cur = queryTabs.list.find((t) => t.id === queryTabs.activeId);
   if (cur) {
     cur.sql = editor.value;
+    deriveTabTitle(cur); // 离开前按第一行注释更新标题（随下方 renderQueryTabs 呈现）
     snapshotSelectors(cur);
   }
   const next = queryTabs.list.find((t) => t.id === id);
@@ -4842,6 +4855,7 @@ function saveDraftNow() {
   if (cur) {
     cur.sql = editor.value;
     snapshotSelectors(cur); // 活动标签的选择器始终与查询栏同步
+    if (deriveTabTitle(cur)) renderQueryTabs(); // SQL 第一行 -- 注释 → 标签标题（随实时缓存防抖更新）
   }
   localStorage.setItem(
     'archery-draft',
