@@ -2116,3 +2116,14 @@ dialog#modal.wide { max-width: min(1320px, 96vw); max-height: 90vh; }
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* ---------- 查询标签的 实例/库 副标题 ---------- */
+.result-tab .tab-env {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.result-tab.active .tab-env { color: inherit; opacity: 0.75; }

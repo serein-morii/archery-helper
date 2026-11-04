@@ -100,7 +100,11 @@ function makeSearchable(select) {
     }
   };
 
-  const onScroll = () => close();
+  // 页面滚动时收起避免错位；面板列表自身的滚动（滚轮翻选项）不关闭
+  const onScroll = (e) => {
+    if (panel.contains(e.target)) return;
+    close();
+  };
   const open = () => {
     panel.hidden = false;
     // fixed 定位按按钮实时位置计算：避免父容器 overflow:hidden 裁剪下拉面板（如提单面板在卡片内）

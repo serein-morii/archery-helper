@@ -460,7 +460,10 @@ async function selectInstance(name) {
   await state.dbsLoading;
 }
 
-$('#instance-name').addEventListener('change', (e) => onInstanceChange(e.target.value));
+$('#instance-name').addEventListener('change', (e) => {
+  onInstanceChange(e.target.value);
+  syncActiveTabSelectors(); // 选择变化同步进活动标签（切换标签时随之带走）
+});
 $('#db-name').addEventListener('change', (e) => {
   state.current.db = e.target.value;
   state.current.schema = '';
@@ -472,6 +475,7 @@ $('#db-name').addEventListener('change', (e) => {
     if (ins?.db_type === 'pgsql') loadSchemas();
   }
   highlightTreeNode(['i', state.current.instance, 'd', e.target.value]);
+  syncActiveTabSelectors();
 });
 
 async function loadSchemas() {
@@ -488,6 +492,11 @@ async function loadSchemas() {
 $('#schema-name').addEventListener('change', (e) => {
   state.current.schema = e.target.value;
   saveDraft();
+  syncActiveTabSelectors();
+});
+$('#limit-num').addEventListener('change', () => {
+  saveDraft();
+  syncActiveTabSelectors();
 });
 
 /* ======================= 对象树 ======================= */
@@ -1364,14 +1373,64 @@ function updateEditorHint() {
 
 /* ======================= 多 SQL 标签页 ======================= */
 const queryTabs = { list: [], activeId: null, seq: 0 };
+let tabApplySeq = 0; // 标签选择器异步恢复序号：快速切标签时丢弃过期恢复
+
+/** 把查询栏当前选择（实例/库/schema/行数上限）快照进标签 */
+function snapshotSelectors(tab) {
+  if (!tab) return;
+  tab.instance = $('#instance-name').value;
+  tab.db = $('#db-name').value;
+  tab.schema = $('#schema-name').value;
+  tab.limit = $('#limit-num').value;
+}
+
+/** 选择器变化时同步到活动标签并刷新标签显示（由各 change 监听调用） */
+function syncActiveTabSelectors() {
+  snapshotSelectors(queryTabs.list.find((t) => t.id === queryTabs.activeId));
+  renderQueryTabs();
+}
+
+/** 恢复标签自带的选择器（实例→库→schema 逐级等待就绪） */
+async function applyTabSelectors(tab) {
+  const seq = ++tabApplySeq;
+  // 先捕获目标值：中途实例切换会清空查询栏并触发 change→快照，把 tab 字段覆盖掉
+  const want = {
+    instance: tab.instance || '',
+    db: tab.db || '',
+    schema: tab.schema || '',
+    limit: tab.limit || '',
+  };
+  if (want.instance && $('#instance-name').querySelector(`option[value="${CSS.escape(want.instance)}"]`)) {
+    await selectInstance(want.instance);
+  } else {
+    await selectInstance('');
+  }
+  if (seq !== tabApplySeq) return; // 期间又切了标签
+  if (want.db && $('#db-name').querySelector(`option[value="${CSS.escape(want.db)}"]`)) {
+    setSelectValue('#db-name', want.db); // change 监听负责 state/草稿/预载表/树高亮
+    const ins = state.instances.find((i) => i.instance_name === want.instance);
+    if (ins?.db_type === 'pgsql') {
+      await loadSchemas();
+      if (seq !== tabApplySeq) return;
+      if (want.schema && $('#schema-name').querySelector(`option[value="${CSS.escape(want.schema)}"]`)) {
+        setSelectValue('#schema-name', want.schema);
+      }
+    }
+  }
+  if (want.limit) $('#limit-num').value = want.limit;
+  if (seq !== tabApplySeq) return;
+  snapshotSelectors(tab); // 结束后以查询栏最终状态回写标签（limit 直设不派发 change，需手动补）
+  renderQueryTabs();
+}
 
 function renderQueryTabs() {
   const bar = $('#query-tabs');
   bar.replaceChildren();
   for (const t of queryTabs.list) {
     const label = t.title || `查询 ${t.id}`;
+    const env = t.instance ? `<span class="tab-env" title="${escapeHtml(`${t.instance}${t.db ? `/${t.db}` : ''}${t.limit ? ` · ${t.limit}行` : ''}`)}">${escapeHtml(t.instance)}${t.db ? `/${escapeHtml(t.db)}` : ''}</span>` : '';
     const tab = el(`<div class="result-tab ${t.id === queryTabs.activeId ? 'active' : ''}" data-id="${t.id}">
-      <span>${escapeHtml(label)}</span>
+      <span>${escapeHtml(label)}</span>${env}
       <span class="close-x">${icon('close')}</span>
     </div>`);
     tab.addEventListener('click', (e) => {
@@ -1389,13 +1448,19 @@ function renderQueryTabs() {
 }
 
 function newQueryTab(sql = '') {
-  // 当前内容先存回活动 tab
+  tabApplySeq++; // 使在途的标签选择器恢复失效（避免旧标签的恢复写入新标签期间的选择器）
+  // 当前内容与选择先存回活动 tab
   if (queryTabs.activeId) {
     const cur = queryTabs.list.find((t) => t.id === queryTabs.activeId);
-    if (cur) cur.sql = editor.value;
+    if (cur) {
+      cur.sql = editor.value;
+      snapshotSelectors(cur);
+    }
   }
   queryTabs.seq += 1;
+  // 新标签继承当前选择（查询栏不动），快照即继承值
   const tab = { id: queryTabs.seq, title: '', sql };
+  snapshotSelectors(tab);
   queryTabs.list.push(tab);
   queryTabs.activeId = tab.id;
   editor.setValue(sql);
@@ -1407,12 +1472,16 @@ function newQueryTab(sql = '') {
 function switchQueryTab(id) {
   if (id === queryTabs.activeId) return;
   const cur = queryTabs.list.find((t) => t.id === queryTabs.activeId);
-  if (cur) cur.sql = editor.value;
+  if (cur) {
+    cur.sql = editor.value;
+    snapshotSelectors(cur);
+  }
   const next = queryTabs.list.find((t) => t.id === id);
   if (!next) return;
   queryTabs.activeId = id;
   editor.setValue(next.sql);
   renderQueryTabs();
+  applyTabSelectors(next); // 异步恢复该标签的实例/库/schema/limit（含过期保护）
   saveDraft();
 }
 
@@ -1425,6 +1494,8 @@ function closeQueryTab(id) {
     if (next) {
       queryTabs.activeId = next.id;
       editor.setValue(next.sql);
+      renderQueryTabs();
+      applyTabSelectors(next);
     } else {
       newQueryTab();
       return;
@@ -4768,11 +4839,17 @@ function saveDraft() {
 }
 function saveDraftNow() {
   const cur = queryTabs.list.find((t) => t.id === queryTabs.activeId);
-  if (cur) cur.sql = editor.value;
+  if (cur) {
+    cur.sql = editor.value;
+    snapshotSelectors(cur); // 活动标签的选择器始终与查询栏同步
+  }
   localStorage.setItem(
     'archery-draft',
     JSON.stringify({
-      tabs: queryTabs.list.map((t) => ({ id: t.id, title: t.title, sql: t.sql })),
+      tabs: queryTabs.list.map((t) => ({
+        id: t.id, title: t.title, sql: t.sql,
+        instance: t.instance || '', db: t.db || '', schema: t.schema || '', limit: t.limit || '',
+      })),
       activeTab: queryTabs.activeId,
       tabSeq: queryTabs.seq,
       instance: $('#instance-name').value,
@@ -4805,20 +4882,34 @@ async function restoreDraft() {
     queryTabs.activeId = active.id;
     editor.setValue(active.sql || '');
     renderQueryTabs();
+    // 恢复活动标签自带的选择器（旧草稿 tabs 无这些字段时回退顶层单草稿字段）
+    const want = {
+      instance: active.instance ?? draft.instance,
+      db: active.db ?? draft.db,
+      schema: active.schema ?? draft.schema,
+      limit: active.limit ?? draft.limit,
+    };
+    if (want.limit) $('#limit-num').value = want.limit;
+    if (want.instance && $('#instance-name').querySelector(`option[value="${CSS.escape(want.instance)}"]`)) {
+      await selectInstance(want.instance);
+      if (want.db && $('#db-name').querySelector(`option[value="${CSS.escape(want.db)}"]`)) {
+        setSelectValue('#db-name', want.db); // change 监听负责 state/草稿/预载表/树高亮
+        const ins = state.instances.find((i) => i.instance_name === want.instance);
+        if (ins?.db_type === 'pgsql') {
+          await loadSchemas();
+          if (want.schema && $('#schema-name').querySelector(`option[value="${CSS.escape(want.schema)}"]`)) {
+            setSelectValue('#schema-name', want.schema);
+          }
+        }
+      }
+    }
   } else {
     newQueryTab(draft.sql || '');
-  }
-  if (draft.limit) $('#limit-num').value = draft.limit;
-  if (draft.instance && $('#instance-name').querySelector(`option[value="${CSS.escape(draft.instance)}"]`)) {
-    await selectInstance(draft.instance);
-    if (draft.db && $('#db-name').querySelector(`option[value="${CSS.escape(draft.db)}"]`)) {
-      setSelectValue('#db-name', draft.db); // change 监听负责 state/草稿/预载表/树高亮
-      const ins = state.instances.find((i) => i.instance_name === draft.instance);
-      if (ins?.db_type === 'pgsql') {
-        await loadSchemas();
-        if (draft.schema && $('#schema-name').querySelector(`option[value="${CSS.escape(draft.schema)}"]`)) {
-          setSelectValue('#schema-name', draft.schema);
-        }
+    if (draft.limit) $('#limit-num').value = draft.limit;
+    if (draft.instance && $('#instance-name').querySelector(`option[value="${CSS.escape(draft.instance)}"]`)) {
+      await selectInstance(draft.instance);
+      if (draft.db && $('#db-name').querySelector(`option[value="${CSS.escape(draft.db)}"]`)) {
+        setSelectValue('#db-name', draft.db);
       }
     }
   }
