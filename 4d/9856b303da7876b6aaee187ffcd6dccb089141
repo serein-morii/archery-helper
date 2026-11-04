@@ -1,0 +1,21 @@
+main.html
+  s_c1877e31f01f19::t_d3f56abdf96620 108-112
+styles.css
+  s_c1877e31f01f19::t_9bfe8e4bda5c39 1331
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4d9856b303da7876b6aaee187ffcd6dccb089141",
+  "prompts": {},
+  "sessions": {
+    "s_c1877e31f01f19": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a16c9e-ea5d-7481-bbb2-6687680281c3",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "pengchenghui <pengchenghui@jtexpress.com>"
+    }
+  }
+}
