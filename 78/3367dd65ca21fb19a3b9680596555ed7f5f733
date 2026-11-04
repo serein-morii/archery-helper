@@ -1,0 +1,20 @@
+CHANGELOG.md
+  h_d554d32aa9d663 5-6
+js/app.js
+  h_d554d32aa9d663 463-466,478,495-499,1376-1424,1431,1433,1451-1452,1455-1458,1461,1463,1475-1478,1484,1497-1498,4842-4845,4849-4852,4885-4905,4908-4912
+js/combo.js
+  h_d554d32aa9d663 103-107
+styles.css
+  h_d554d32aa9d663 2119-2129
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "783367dd65ca21fb19a3b9680596555ed7f5f733",
+  "prompts": {},
+  "humans": {
+    "h_d554d32aa9d663": {
+      "author": "pengchenghui <pengchenghui@jtexpress.com>"
+    }
+  }
+}
