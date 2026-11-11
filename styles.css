@@ -2126,3 +2126,22 @@ dialog#modal.wide { max-width: min(1320px, 96vw); max-height: 90vh; }
   text-overflow: ellipsis;
 }
 .result-tab.active .tab-env { color: inherit; opacity: 0.75; }
+
+/* ---------- 设置页：开源地址 ---------- */
+.setting-repo {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  font-size: 12px;
+}
+.setting-repo .icon { width: 13px; height: 13px; color: var(--text-3); }
+.setting-repo a {
+  color: var(--brand);
+  font-family: var(--mono);
+  text-decoration: none;
+}
+.setting-repo a:hover { text-decoration: underline; }
+.setting-repo .icon-button { width: 22px; height: 22px; }

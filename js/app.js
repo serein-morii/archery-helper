@@ -5207,8 +5207,17 @@ $('#settings-open').addEventListener('click', async () => {
         <button class="button small" id="set-changelog">更新日志</button>
         <button class="button small" id="set-shortcut">快捷键</button>
       </div>
+    </div>
+    <div class="setting-repo">
+      <span data-icon="file"></span>
+      <a href="${GITHUB_PAGE}" target="_blank" rel="noreferrer" title="点击打开开源仓库">${GITHUB_PAGE.replace('https://', '')}</a>
+      <button class="icon-button" id="set-repo-copy" title="复制仓库地址">${icon('copy')}</button>
     </div>`;
   openModal('设置', body);
+  body.querySelector('#set-repo-copy').addEventListener('click', () => {
+    navigator.clipboard.writeText(GITHUB_PAGE);
+    toast('已复制开源地址', 'success');
+  });
   body.querySelector('#set-save').addEventListener('click', async () => {
     const baseUrl = normalizeBase(body.querySelector('#set-url').value);
     if (!/^https?:\/\/.+/.test(baseUrl)) return toast('地址格式不正确', 'error');
