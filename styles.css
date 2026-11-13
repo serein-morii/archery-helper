@@ -2137,11 +2137,15 @@ dialog#modal.wide { max-width: min(1320px, 96vw); max-height: 90vh; }
   border-top: 1px dashed var(--border);
   font-size: 12px;
 }
-.setting-repo .icon { width: 13px; height: 13px; color: var(--text-3); }
-.setting-repo a {
-  color: var(--brand);
-  font-family: var(--mono);
-  text-decoration: none;
+.setting-repo .setting-repo-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: var(--text-3);
+  transition: all 0.13s ease;
 }
-.setting-repo a:hover { text-decoration: underline; }
+.setting-repo .setting-repo-link:hover { color: var(--text-1); background: var(--panel-2); }
 .setting-repo .icon-button { width: 22px; height: 22px; }
