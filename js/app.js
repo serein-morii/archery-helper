@@ -1390,15 +1390,27 @@ function syncActiveTabSelectors() {
   renderQueryTabs();
 }
 
-/** 从 SQL 第一行 `-- 标题` 派生标签标题；变化时刷新标签栏。返回是否变化 */
+/** 从 SQL 第一行 `-- 标题` 派生标签标题；变化时刷新标签栏。返回是否变化。
+ *  手动重命名过（tab.renamed）的标签不被注释派生覆盖。 */
 function deriveTabTitle(tab) {
-  if (!tab) return false;
+  if (!tab || tab.renamed) return false;
   const firstLine = String(tab.sql || '').split('\n')[0].trim();
   const m = firstLine.match(/^--\s*(.*)$/);
   const title = m ? m[1].trim().slice(0, 40) : '';
   if (title === (tab.title || '')) return false;
   tab.title = title;
   return true;
+}
+
+/** 双击标签重命名：手动命名优先于 -- 注释派生；清空则恢复自动派生 */
+async function renameQueryTab(tab) {
+  const name = await promptText('标签名称（留空恢复自动派生）：', tab.title || '');
+  if (name === null) return; // 取消
+  const trimmed = name.trim().slice(0, 40);
+  tab.renamed = trimmed.length > 0;
+  tab.title = tab.renamed ? trimmed : deriveTabTitle(tab) ? tab.title : '';
+  renderQueryTabs();
+  saveDraft();
 }
 
 /** 恢复标签自带的选择器（实例→库→schema 逐级等待就绪） */
@@ -1430,7 +1442,10 @@ async function applyTabSelectors(tab) {
   }
   if (want.limit) $('#limit-num').value = want.limit;
   if (seq !== tabApplySeq) return;
-  snapshotSelectors(tab); // 结束后以查询栏最终状态回写标签（limit 直设不派发 change，需手动补）
+  // 回写以查询栏最终状态为准；但库列表加载失败时查询栏 db 为空——保留标签原记忆，不抹掉
+  snapshotSelectors(tab);
+  if (!tab.db && want.db) tab.db = want.db;
+  if (!tab.instance && want.instance) tab.instance = want.instance;
   renderQueryTabs();
 }
 
@@ -1440,7 +1455,7 @@ function renderQueryTabs() {
   for (const t of queryTabs.list) {
     const label = t.title || `查询 ${t.id}`;
     const env = t.instance ? `<span class="tab-env" title="${escapeHtml(`${t.instance}${t.db ? `/${t.db}` : ''}${t.limit ? ` · ${t.limit}行` : ''}`)}">${escapeHtml(t.instance)}${t.db ? `/${escapeHtml(t.db)}` : ''}</span>` : '';
-    const tab = el(`<div class="result-tab ${t.id === queryTabs.activeId ? 'active' : ''}" data-id="${t.id}">
+    const tab = el(`<div class="result-tab ${t.id === queryTabs.activeId ? 'active' : ''}" data-id="${t.id}" title="双击重命名">
       <span>${escapeHtml(label)}</span>${env}
       <span class="close-x">${icon('close')}</span>
     </div>`);
@@ -1450,6 +1465,11 @@ function renderQueryTabs() {
         return;
       }
       switchQueryTab(t.id);
+    });
+    tab.addEventListener('dblclick', (e) => {
+      if (e.target.closest('.close-x')) return;
+      e.preventDefault();
+      renameQueryTab(t);
     });
     bar.appendChild(tab);
   }
@@ -4861,7 +4881,7 @@ function saveDraftNow() {
     'archery-draft',
     JSON.stringify({
       tabs: queryTabs.list.map((t) => ({
-        id: t.id, title: t.title, sql: t.sql,
+        id: t.id, title: t.title, sql: t.sql, renamed: !!t.renamed,
         instance: t.instance || '', db: t.db || '', schema: t.schema || '', limit: t.limit || '',
       })),
       activeTab: queryTabs.activeId,
