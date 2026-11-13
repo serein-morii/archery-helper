@@ -1,0 +1,18 @@
+CHANGELOG.md
+  h_d554d32aa9d663 203
+js/app.js
+  h_d554d32aa9d663 5232-5235
+styles.css
+  h_d554d32aa9d663 2140-2148,2150
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "52a9f99377eb5b6786058f3df054d0f75ad1031a",
+  "prompts": {},
+  "humans": {
+    "h_d554d32aa9d663": {
+      "author": "pengchenghui <pengchenghui@jtexpress.com>"
+    }
+  }
+}
